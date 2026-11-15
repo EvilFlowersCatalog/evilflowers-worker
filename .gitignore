@@ -1,0 +1,15 @@
+.venv
+.DS_Store
+__pycache__
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+coverage.xml
+.idea/
+.env
+
+test_data/
+data/
+models/
+.mcp.json

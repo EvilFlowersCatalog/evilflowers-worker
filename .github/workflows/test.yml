@@ -1,0 +1,54 @@
+# Lint, type-check and test the kit on every push and pull request.
+#
+# The real-broker tests in tests/test_runtime.py need Redis. With `CI` set (GitHub sets it) they fail instead of
+# skipping when Redis does not answer: they are the only guard of the private kombu and Celery APIs that
+# shutdown.py uses (kombu's `restore_by_tag`, Celery's `_shutdown_handler`).
+
+name: Test
+
+on:
+  push:
+    branches: [ "master" ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_REDIS_URL: redis://localhost:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # Core + the `otel` extra (so the trace-propagation tests run) + the dev group.
+      - name: Install
+        run: uv sync --locked --extra otel
+      - name: Lint
+        run: |
+          uv run ruff check
+          uv run ruff format --check
+      - name: Type-check
+        run: uv run mypy
+      - name: Test
+        run: uv run pytest -q --cov=evilflowers_worker --cov-report=term-missing

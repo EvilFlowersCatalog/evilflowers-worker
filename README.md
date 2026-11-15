@@ -2,7 +2,7 @@
 
 The runtime of the EvilFlowers extraction workers: the message contract, the catalog client, the Celery delivery
 semantics and the observability, in one package. The design is in
-[`docs/architecture.md`](../../docs/architecture.md).
+[`docs/architecture.md`](docs/architecture.md).
 
 It has no model, layout or PDF dependency, so every service can depend on it:
 
@@ -11,7 +11,7 @@ It has no model, layout or PDF dependency, so every service can depend on it:
 dependencies = ["evilflowers-worker"]
 
 [tool.uv.sources]
-evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-analyzer-service", subdirectory = "packages/evilflowers-worker", rev = "<sha>" }
+evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", rev = "<sha>" }
 ```
 
 Extras:

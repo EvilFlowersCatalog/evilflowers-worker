@@ -31,9 +31,44 @@ profiling = [
     "pyroscope-otel==1.1.0",
 ]
 
+[dependency-groups]
+# `uv sync` installs the core and this group only; CI adds `--extra otel`.
+dev = [
+    "opentelemetry-sdk==1.45.2",
+    "pytest>=8.3",
+    "pytest-cov>=6",
+    "mypy>=1.13",
+    "ruff>=0.14",
+]
+
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/evilflowers_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 119
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "LOG", "G"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["evilflowers_worker"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["evilflowers_worker.*"]
+disallow_untyped_defs = true
