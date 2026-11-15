@@ -1,12 +1,13 @@
 import json
+import pickle
 
 import pytest
 import requests
 from pydantic import SecretStr
 
 from evilflowers_worker import catalog as catalog_module
-from evilflowers_worker.catalog import CatalogClient, RunNotRunning, RunSuperseded
-from evilflowers_worker.contract import JobReport, Paragraph, ParagraphLink, Region, StartRun
+from evilflowers_worker.catalog import CatalogClient, CatalogRefused, RunNotRunning, RunSuperseded
+from evilflowers_worker.contract import MAX_ERROR_LENGTH, JobReport, Paragraph, ParagraphLink, Region, StartRun
 from evilflowers_worker.http import session, user_agent
 
 BOX = {"x0": 0.1, "y0": 0.2, "x1": 0.3, "y1": 0.4}
@@ -157,6 +158,67 @@ def test_4xx_is_not_retried(settings):
     with pytest.raises(requests.HTTPError):
         catalog.start(StartRun(page_count=1, page_sizes=[[1, 1]], jobs=[]))
     assert len(http.calls) == 1
+
+
+PROBLEM = {
+    "type": "/errors/validation",
+    "title": "Invalid ParagraphsForm",
+    "status": 422,
+    "errors": {"paragraphs.37.embedding": ["expected 1024 dimensions, got 768"]},
+}
+
+
+def test_a_refusal_carries_the_catalogs_body_into_the_exception_and_the_log(settings, caplog):
+    small = settings.model_copy(update={"catalog_batch_size": 100})
+    paragraphs = [Paragraph(page=1, seq=n, bbox=BOX, text=f"secret paragraph {n}") for n in range(250)]
+    catalog, http = client(small, Response(201), Response(422, PROBLEM), attempt=4)
+
+    with caplog.at_level("ERROR", logger="evilflowers_worker.catalog"), pytest.raises(CatalogRefused) as raised:
+        catalog.paragraphs(paragraphs)
+
+    error = raised.value
+    assert len(http.calls) == 2  # the second batch, not retried
+    assert isinstance(error, requests.HTTPError) and error.status == 422
+    assert str(error).startswith(
+        "Catalog refused POST /paragraphs (run run-1, attempt 4, batch 2/3, seq 100-199): 422 "
+    )
+    assert "expected 1024 dimensions, got 768" in str(error) and "paragraphs.37.embedding" in str(error)
+
+    [record] = [record for record in caplog.records if record.levelname == "ERROR"]
+    assert record.getMessage() == str(error)
+    # What was sent never reaches the log.
+    assert "secret paragraph" not in caplog.text
+
+
+def test_a_refusal_fits_the_reported_error_whole(settings):
+    catalog, _http = client(settings, Response(400, {"detail": "x" * 10_000}))
+    with pytest.raises(CatalogRefused) as raised:
+        catalog.regions([Region(kind="figure", page=1, seq=7, bbox=BOX)])
+    error = raised.value
+    assert len(error.body) == catalog_module.MAX_BODY_LENGTH and error.body.endswith("…")
+    assert "(run run-1, attempt None, batch 1/1, seq 7-7): 400 " in str(error)
+    # What `LeafJob` reports as the job's error, within the catalog's limit.
+    assert len(f"{type(error).__name__}: {error}") <= MAX_ERROR_LENGTH
+
+
+def test_a_refusal_without_json_keeps_the_text(settings):
+    catalog, _http = client(settings, Response(403, b"<html>\n  Forbidden\n</html>"))
+    with pytest.raises(
+        CatalogRefused,
+        match=r"^Catalog refused POST /jobs/figures \(run run-1, attempt None\): 403 <html> Forbidden </html>$",
+    ):
+        catalog.job("figures", JobReport(status="done"))
+
+
+def test_a_refusal_survives_pickling():
+    error = pickle.loads(pickle.dumps(CatalogRefused("Catalog refused POST /regions: 422 {}", status=422, body="{}")))
+    assert (str(error), error.status, error.body) == ("Catalog refused POST /regions: 422 {}", 422, "{}")
+
+
+def test_the_last_5xx_carries_its_body_too(settings):
+    catalog, _http = client(settings, Response(503), Response(503, {"title": "maintenance"}))
+    with pytest.raises(CatalogRefused, match=r"503 .*maintenance"):
+        catalog.run()
 
 
 def test_retry_metric_routes_have_bounded_cardinality():

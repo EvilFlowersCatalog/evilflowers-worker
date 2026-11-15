@@ -140,7 +140,11 @@ Behaviour:
   - `not_running` or none → `RunNotRunning`: drop quietly;
   - `duplicate` → `DuplicateResults`: report the job `failed`, because the run still waits for it.
 
-  Other 4xx raise. Connection errors and 5xx are retried with exponential backoff and counted in
+  Other 4xx are not retried and raise `CatalogRefused` (an `HTTPError`), as does a 5xx on the last try. Its message
+  carries the call, run, attempt, batch (`batch 2/12, seq 100-199`), status and the catalog's response body, capped at
+  1500 characters. That one line is logged at ERROR and becomes the job's reported `error`, so a 422 says which field
+  was refused in Loki and in `extraction_run.error` (evilflowers-worker#4). The request payload is never logged.
+  Connection errors and 5xx are retried with exponential backoff and counted in
   `<service>_catalog_retries_total{route,reason}`.
 
 ### 3.3 Delivery semantics
@@ -234,7 +238,7 @@ src/evilflowers_worker/
 ├── settings.py        RuntimeSettings: broker, storage (storage_file), shutdown, delivery cap, logs;
 │                      WorkerSettings = RuntimeSettings + the catalog ingestion API (services subclass one of them)
 ├── contract.py        message models + catalog payload models (Box, LayoutRegion, Region, JobReport, RunState, …)
-├── catalog.py         CatalogClient for /extraction/v1, RunNotRunning / RunSuperseded / DuplicateResults
+├── catalog.py         CatalogClient for /extraction/v1, RunNotRunning / RunSuperseded / DuplicateResults / CatalogRefused
 ├── http.py            requests session (User-Agent, bearer key)
 ├── deliveries.py      DeliveryCounter (Redis): count, cap, forget on a deliberate requeue
 ├── jobs.py            LeafJob: check → extract → publish → report, outcomes, invalid-message report
@@ -290,7 +294,8 @@ A fix here reaches a service when it bumps `rev` (and runs `uv lock`); nothing c
 
 | Step | Where |
 |---|---|
-| Kit | this repository (`master` @ `bdc3336`; catalog jobs on branch `catalog-jobs`, evilflowers-worker#3) |
+| Kit | this repository (`master`; catalog jobs since `c37d860`, evilflowers-worker#3) |
+| The catalog's 4xx body in the job's error and the log | evilflowers-worker#4 |
 | Analyzer on the kit | evilflowers-analyzer-service (pinned to `ae8e238`) |
 | text, image, equation adopt the kit | text-service#16, #17 (+ #15 `outline`), image-service#5, equation-service#7 |
 | Housekeeping: README, tooling, CI with Redis | evilflowers-worker#1 |

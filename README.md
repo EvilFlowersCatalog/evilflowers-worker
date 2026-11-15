@@ -29,7 +29,7 @@ The image installs both. Without them, everything is a no-op.
 | Module | What it gives a service |
 |---|---|
 | `contract` | `ExtractRequest`, `ParagraphsJob`, `RegionsJob` (commands); `Region`, `Paragraph`, `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
-| `catalog` | `CatalogClient`: `run()`, `start()`, `regions()`, `paragraphs()`, `job()`; `?attempt=`; `RunNotRunning` / `RunSuperseded` / `DuplicateResults` |
+| `catalog` | `CatalogClient`: `run()`, `start()`, `regions()`, `paragraphs()`, `job()`; `?attempt=`; `RunNotRunning` / `RunSuperseded` / `DuplicateResults` / `CatalogRefused` (a refusal with the catalog's body) |
 | `jobs` | `LeafJob`: delivery cap, check, `extract`, `publish`, terminal report, `recheck()` for long jobs |
 | `outcome` | `OutcomeFile`, `atomic_write`, `write_outcome`: a catalog job's outcome file, last and atomic |
 | `runtime` | `create_app()`, `JOB_TASK_OPTIONS`, `run_job()` (leaf jobs), `run_task()` (anything else), `Publisher` / `CeleryPublisher`, `runtime().delivery(task)` |
