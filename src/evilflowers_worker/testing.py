@@ -2,6 +2,7 @@
 
 - ``FakeCatalog`` / ``RefusingCatalog`` / ``RecordingPublisher``: in-process stand-ins with the real interfaces;
 - ``StubCatalogServer``: the ingestion API on localhost, for a real worker;
+- ``assert_outcome``: the outcome file a catalog job left (``outcome``), checked as the catalog would read it;
 - ``WorkerProcess`` / ``redis_client`` / ``wait_for``: a real prefork worker against a real Redis.
 """
 
@@ -13,6 +14,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
 from evilflowers_worker.catalog import RunNotRunning
@@ -111,6 +113,39 @@ class RefusingCatalog(FakeCatalog):
         super().__init__(**kwargs)
         self.error = error or RunNotRunning("finished")
         self.fail_on.update({"regions": self.error, "paragraphs": self.error, "job": self.error})
+
+
+def assert_outcome(
+    storage: Path,
+    relative: str,
+    *,
+    run_id: str | None = None,
+    token: str | None = None,
+    status: str | None = None,
+    after: str | None = None,
+) -> dict[str, Any]:
+    """The outcome file at ``relative`` under ``storage``, parsed; fails unless it is what the catalog expects.
+
+    - it exists, parses as a JSON object and no ``.partial`` is left beside it;
+    - ``run_id`` / ``token`` / ``status``, when given, match (the token must come back untouched);
+    - ``after``: the output (relative too) exists and was written no later than the outcome, the commit marker.
+    """
+    import json
+
+    path = storage / relative
+    assert path.is_file(), f"no outcome file at {relative}"
+    assert not path.with_name(path.name + ".partial").exists(), f"a .partial is left beside {relative}"
+    outcome = json.loads(path.read_text())
+    assert isinstance(outcome, dict), f"the outcome file {relative} is not a JSON object"
+    expected = {"run_id": run_id, "token": token, "status": status}
+    for key, value in expected.items():
+        if value is not None:
+            assert outcome.get(key) == value, f"outcome {key}: {outcome.get(key)!r}, expected {value!r}"
+    if after is not None:
+        output = storage / after
+        assert output.is_file(), f"no output at {after}"
+        assert output.stat().st_mtime_ns <= path.stat().st_mtime_ns, f"the outcome was written before {after}"
+    return outcome
 
 
 def wait_for(condition: Callable[[], Any], timeout: float, interval: float = 0.2) -> bool:

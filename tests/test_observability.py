@@ -38,6 +38,31 @@ def test_the_identity_names_everything_after_the_service():
         observability.configure(previous.service, version=previous.version, log_format=previous.log_format)
 
 
+def test_a_catalog_job_binds_its_run_under_the_job_ledger_names():
+    sdk = pytest.importorskip("opentelemetry.sdk.trace")
+    tracer = sdk.TracerProvider().get_tracer("test")
+    previous = observability.identity()
+    try:
+        observability.configure("ocr", attributes={**observability.CATALOG_JOB_ATTRIBUTES, "engine": "ocr.engine"})
+        with (
+            tracer.start_as_current_span("task") as span,
+            observability.bind(run_id="r-1", job_id="j-1", engine="t", delivery=2),
+        ):
+            payload = line()
+        # The log line keeps the short names: a Loki query for `run_id` finds every service's lines.
+        assert payload["run_id"] == "r-1" and payload["job_id"] == "j-1"
+        assert span.attributes["evilflowers.run.id"] == "r-1"
+        assert span.attributes["evilflowers.job.id"] == "j-1"
+        assert span.attributes["ocr.engine"] == "t"
+        assert span.attributes["evilflowers.job.delivery"] == 2
+        assert "evilflowers.extraction.run_id" not in span.attributes
+        # Canonical names the service does not override stay canonical.
+        assert observability.span_attribute("source") == "evilflowers.source"
+    finally:
+        observability.configure(previous.service, version=previous.version, log_format=previous.log_format)
+    assert observability.span_attribute("run_id") == "evilflowers.extraction.run_id"
+
+
 # -- Endpoint discovery ---------------------------------------------------------------------------------------------
 
 

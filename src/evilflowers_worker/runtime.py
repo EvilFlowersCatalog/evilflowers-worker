@@ -10,24 +10,34 @@
 - the scale-in protocol of ``shutdown``;
 - telemetry and JSON logs (``observability``).
 
-Nobody waits for a task's result (every job reports to the catalog), so there is no result backend.
+Nobody waits for a task's result (every job reports to the catalog, or leaves an outcome file), so there is no result
+backend.
+
+A task body is one of two calls (docs/architecture.md §2):
+
+- ``run_job``: an extraction leaf job (``LeafJob``), which reads its run and reports over the ingestion API;
+- ``run_task``: anything else, e.g. a catalog job that writes an outcome file. The service says what happens past the
+  delivery cap and with an invalid message.
+
+What ``create_app`` does not set is per task, on the task: ``**JOB_TASK_OPTIONS`` always, and limits such as
+``time_limit=`` where the service has one. A service never needs a Celery configuration of its own.
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from celery import Celery, Task
 from kombu import Exchange, Queue
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from evilflowers_worker import observability
 from evilflowers_worker.contract import JobMessage, Message, Route
-from evilflowers_worker.deliveries import DeliveryCounter
+from evilflowers_worker.deliveries import DeliveryCounter, capped
 from evilflowers_worker.jobs import LeafJob, report_invalid_message
 from evilflowers_worker.observability.signals import connect as connect_telemetry
-from evilflowers_worker.settings import WorkerSettings
+from evilflowers_worker.settings import RuntimeSettings, WorkerSettings
 from evilflowers_worker.shutdown import Shutdown
 
 logger = logging.getLogger(__name__)
@@ -38,9 +48,9 @@ JOB_TASK_OPTIONS: Mapping[str, Any] = {"acks_late": True, "reject_on_worker_lost
 
 
 class CeleryConfig:
-    """The configuration shared by every extraction service."""
+    """The configuration shared by every service on the db."""
 
-    def __init__(self, settings: WorkerSettings, queues: Sequence[str], routes: Mapping[str, str]):
+    def __init__(self, settings: RuntimeSettings, queues: Sequence[str], routes: Mapping[str, str]):
         self.broker_url = settings.redis_url
         self.broker_connection_retry_on_startup = True
         self.broker_transport_options = {"visibility_timeout": settings.broker_visibility_timeout}
@@ -68,7 +78,7 @@ class Runtime:
     """What a running service is: its name, its settings and its delivery counter."""
 
     service: str
-    settings: WorkerSettings
+    settings: RuntimeSettings
     deliveries: DeliveryCounter
 
     def delivery(self, task: Task) -> int:
@@ -83,19 +93,24 @@ _runtime: Runtime | None = None
 
 def create_app(
     service: str,
-    settings: WorkerSettings,
+    settings: RuntimeSettings,
     *,
     include: Sequence[str],
     queues: Sequence[str] | None = None,
     routes: Mapping[str, str] | None = None,
+    attributes: Mapping[str, str] | None = None,
 ) -> Celery:
     """The service's Celery app. ``service`` is its short name (``analyzer``): metric prefix, scope, Pyroscope app.
 
-    ``queues``: what it consumes (default: ``settings.queue``); ``routes``: task-name pattern → queue for tasks it
-    sends without naming a queue (default: ``evilflowers_<service>.*`` → the first queue).
+    - ``queues``: what it consumes (default: ``settings.queue``);
+    - ``routes``: task-name pattern → queue for tasks it sends without naming a queue (default:
+      ``evilflowers_<service>.*`` → the first queue). A service whose task names follow another prefix passes its own
+      (``{"evilflowers_ocr_worker.*": settings.queue}``): the task names are a contract with the catalog;
+    - ``attributes``: span names of the fields it binds beyond the canonical set
+      (``observability.CATALOG_JOB_ATTRIBUTES`` for a catalog job).
     """
     global _runtime
-    observability.configure(service, version=settings.image_tag, log_format=settings.log_format)
+    observability.configure(service, version=settings.image_tag, log_format=settings.log_format, attributes=attributes)
     connect_telemetry()
 
     queues = list(queues or [settings.queue])
@@ -136,12 +151,62 @@ def run_job[M: JobMessage](
             return run_job(self, FiguresJob, RegionsJob, kwargs)
     """
     current = runtime()
+    settings = current.settings
+    if not isinstance(settings, WorkerSettings):
+        raise TypeError(
+            "run_job needs WorkerSettings (a leaf job reports over the catalog ingestion API); "
+            "a worker without the catalog client uses run_task"
+        )
     try:
         message = message_type.model_validate(kwargs)
     except ValidationError as error:
-        return report_invalid_message(kwargs, error, job=job_type.kind, settings=current.settings)
-    job = job_type(message, settings=current.settings, task_id=task.request.id, delivery=current.delivery(task))
+        return report_invalid_message(kwargs, error, job=job_type.kind, settings=settings)
+    job = job_type(message, settings=settings, task_id=task.request.id, delivery=current.delivery(task))
     return job.run()
+
+
+def run_task[M: BaseModel, R](
+    task: Task,
+    handler: Callable[[M, int], R],
+    message_type: type[M],
+    kwargs: dict[str, Any],
+    *,
+    on_capped: Callable[[M, int], R],
+    on_invalid: Callable[[dict[str, Any], ValidationError], R] | None = None,
+) -> R:
+    """The body of a task that is not an extraction leaf job: validate the message, count the delivery, run it.
+
+    - ``handler(message, delivery)``: the work. ``delivery`` counts from 1;
+    - ``on_capped(message, delivery)``: called *instead of* the handler once the delivery is past ``MAX_DELIVERIES``
+      (the job killed its worker every time). It records the job failed the service's way (a catalog job writes a
+      ``failed`` outcome file and raises); afterwards the message is acknowledged and never delivered again;
+    - ``on_invalid(kwargs, error)``: a message that does not validate. Default: raise the ``ValidationError``, so the
+      task fails at once and is not retried (the same message fails the same way).
+
+    ``task_id`` and ``delivery`` are bound for the whole call (log lines, the task's span)::
+
+        @shared_task(name="evilflowers_ocr_worker.ocr", bind=True, time_limit=..., **JOB_TASK_OPTIONS)
+        def ocr(self, **kwargs) -> dict:
+            return run_task(self, jobs.run, OcrRequest, kwargs, on_capped=jobs.give_up)
+    """
+    current = runtime()
+    try:
+        message = message_type.model_validate(kwargs)
+    except ValidationError as error:
+        logger.error("Invalid message for task %s: %s", task.name, error)
+        if on_invalid is None:
+            raise
+        return on_invalid(kwargs, error)
+    delivery = current.delivery(task)
+    with observability.bind(task_id=task.request.id, delivery=delivery):
+        if capped(delivery, current.settings.max_deliveries):
+            logger.error(
+                "Task %s gave up after %d deliveries: the worker died or was stopped during each of them",
+                task.request.id,
+                delivery - 1,
+            )
+            return on_capped(message, delivery)
+        return handler(message, delivery)
 
 
 class Publisher(Protocol):

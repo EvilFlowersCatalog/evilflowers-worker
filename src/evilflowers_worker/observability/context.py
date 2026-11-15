@@ -11,10 +11,11 @@ from contextvars import ContextVar
 from types import MappingProxyType
 from typing import Any
 
+from evilflowers_worker.observability.identity import identity
 from evilflowers_worker.observability.otel import trace
 
 #: Short (log) name → span attribute name, the same in every extraction service (docs/architecture.md §4).
-#: Other keys keep their name on both.
+#: A service's own ``configure(attributes=...)`` extends or overrides it; other keys keep their name on both.
 SPAN_ATTRIBUTES: Mapping[str, str] = MappingProxyType(
     {
         "run_id": "evilflowers.extraction.run_id",
@@ -29,6 +30,23 @@ SPAN_ATTRIBUTES: Mapping[str, str] = MappingProxyType(
         "task_id": "messaging.message.id",
     }
 )
+
+#: What a catalog job (an IP-031 job-ledger kind, ``files.ocr``) passes as ``configure(attributes=...)``: its run is a
+#: run of the job ledger (``/api/v1/jobs``), not an extraction run, and ``job_id`` is the ledger's job.
+CATALOG_JOB_ATTRIBUTES: Mapping[str, str] = MappingProxyType(
+    {
+        "job_id": "evilflowers.job.id",
+        "run_id": "evilflowers.run.id",
+        # `run_task` binds it; the canonical name would put a catalog job's delivery under `evilflowers.extraction.*`.
+        "delivery": "evilflowers.job.delivery",
+    }
+)
+
+
+def span_attribute(key: str) -> str:
+    """The span attribute name of a bound field: the service's own mapping, then the canonical one, then the key."""
+    return identity().attributes.get(key) or SPAN_ATTRIBUTES.get(key, key)
+
 
 #: Never mutated in place: `bind` sets a new mapping and resets to the old one.
 _fields: ContextVar[Mapping[str, Any]] = ContextVar("evilflowers_worker_fields", default=MappingProxyType({}))
@@ -51,7 +69,7 @@ def bind(**fields: Any) -> Iterator[None]:
     if trace is not None:
         span = trace.get_current_span()
         for key, value in fields.items():
-            span.set_attribute(SPAN_ATTRIBUTES.get(key, key), value)
+            span.set_attribute(span_attribute(key), value)
     token = _fields.set({**_fields.get(), **fields})
     try:
         yield

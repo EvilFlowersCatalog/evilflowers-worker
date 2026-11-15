@@ -20,7 +20,7 @@ import pytest
 from evilflowers_worker.deliveries import DeliveryCounter
 from evilflowers_worker.runtime import create_app
 from evilflowers_worker.settings import WorkerSettings
-from evilflowers_worker.testing import StubCatalogServer, WorkerProcess, redis_client, wait_for
+from evilflowers_worker.testing import StubCatalogServer, WorkerProcess, assert_outcome, redis_client, wait_for
 
 REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")
 HERE = Path(__file__).parent
@@ -212,3 +212,95 @@ def test_an_invalid_message_is_reported_failed_and_dropped(probe):
     ((method, path, body),) = catalog.calls
     assert (method, path) == ("POST", "/extraction/v1/runs/run-1/jobs/figures?attempt=3")
     assert body["status"] == "failed" and body["error"].startswith("Invalid message")
+
+
+# -- Catalog jobs (run_task, outcome files) -------------------------------------------------------------------------
+
+
+def convert_kwargs(**extra: object) -> dict[str, object]:
+    return {
+        "run_id": "run-1",
+        "token": "tok-1",
+        "source": "catalogs/c/e/book.txt",
+        "destination": "catalogs/c/e/ocr/run-1.txt",
+        "outcome": "catalogs/c/e/ocr/run-1.json",
+        **extra,
+    }
+
+
+def test_a_catalog_job_writes_its_output_then_its_outcome(probe, tmp_path):
+    storage = tmp_path / "data"
+    (storage / "catalogs/c/e").mkdir(parents=True)
+    (storage / "catalogs/c/e/book.txt").write_text("scanned")
+    worker = probe(STORAGE_PATH=str(storage))
+    worker.wait_ready()
+    before = worker.unacked()
+    worker.send("probe.convert", **convert_kwargs())
+
+    assert wait_for((storage / "catalogs/c/e/ocr/run-1.json").exists, 30), "no outcome file"
+    outcome = assert_outcome(
+        storage,
+        "catalogs/c/e/ocr/run-1.json",
+        run_id="run-1",
+        token="tok-1",
+        status="done",
+        after="catalogs/c/e/ocr/run-1.txt",
+    )
+    assert outcome["output"] == "catalogs/c/e/ocr/run-1.txt"
+    assert (storage / "catalogs/c/e/ocr/run-1.txt").read_text() == "SCANNED"
+    assert wait_for(lambda: worker.redis.llen(worker.queue) == 0 and worker.unacked() == before, 30)
+
+
+def test_an_invalid_catalog_job_message_fails_once_and_the_worker_goes_on(probe, tmp_path):
+    """``run_task``'s default: the ``ValidationError`` fails the task in the pool child; the message is acked."""
+    storage = tmp_path / "data"
+    (storage / "catalogs/c/e").mkdir(parents=True)
+    (storage / "catalogs/c/e/book.txt").write_text("scanned")
+    worker = probe(STORAGE_PATH=str(storage))
+    worker.wait_ready()
+    before = worker.unacked()
+    invalid = convert_kwargs()
+    del invalid["token"]
+    worker.send("probe.convert", **invalid)
+    assert wait_for(lambda: worker.redis.llen(worker.queue) == 0 and worker.unacked() == before, 30)
+
+    worker.send("probe.convert", **convert_kwargs())
+
+    assert wait_for((storage / "catalogs/c/e/ocr/run-1.json").exists, 30), "the worker did not go on"
+    assert_outcome(storage, "catalogs/c/e/ocr/run-1.json", token="tok-1", status="done")
+    assert wait_for(lambda: worker.redis.llen(worker.queue) == 0 and worker.unacked() == before, 30)
+
+
+def test_a_catalog_job_that_kills_its_worker_ends_with_a_failed_outcome_after_the_cap(probe, tmp_path):
+    storage = tmp_path / "data"
+    worker = probe(STORAGE_PATH=str(storage), MAX_DELIVERIES="2")
+    worker.wait_ready()
+    before = worker.unacked()
+    worker.send("probe.convert", **convert_kwargs(die=True))
+
+    assert wait_for((storage / "catalogs/c/e/ocr/run-1.json").exists, 90), "the cap never wrote an outcome"
+    outcome = assert_outcome(storage, "catalogs/c/e/ocr/run-1.json", run_id="run-1", token="tok-1", status="failed")
+    assert outcome["error"].startswith("gave up after 2 deliveries")
+    assert not (storage / "catalogs/c/e/ocr/run-1.txt").exists()
+    # on_capped raised: the task failed, and the message is acknowledged, never delivered again.
+    assert wait_for(lambda: worker.redis.llen(worker.queue) == 0 and worker.unacked() == before, 30)
+
+
+def test_a_catalog_job_stopped_by_scale_in_leaves_no_outcome_and_is_requeued(probe, tmp_path):
+    """The redelivery carries the same token; an outcome written on the way out would consume it."""
+    storage = tmp_path / "data"
+    (storage / "catalogs/c/e").mkdir(parents=True)
+    (storage / "catalogs/c/e/book.txt").write_text("scanned")
+    worker = probe(STORAGE_PATH=str(storage), WORKER_SOFT_SHUTDOWN_TIMEOUT="2")
+    worker.wait_ready()
+    before = worker.unacked()
+    worker.send("probe.convert", **convert_kwargs(seconds=600))
+    assert wait_for(lambda: worker.unacked() > before, 30), "the job never started"
+
+    worker.signal(signal.SIGTERM)
+
+    assert wait_for(lambda: worker.redis.llen(worker.queue) == 1, 30), "the job was not requeued"
+    assert worker.wait(timeout=30) is not None
+    assert not (storage / "catalogs/c/e/ocr").exists()
+    (requeued,) = worker.queued()
+    assert WorkerProcess.kwargs(requeued)["token"] == "tok-1"

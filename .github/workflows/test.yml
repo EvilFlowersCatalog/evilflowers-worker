@@ -23,6 +23,11 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both ends of `requires-python` in use: the extraction services and ocr-service (3.12), lcpencrypt (3.14).
+        python: [ "3.12", "3.14" ]
     services:
       redis:
         image: redis:7-alpine
@@ -39,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           enable-cache: true
       # Core + the `otel` extra (so the trace-propagation tests run) + the dev group.
       - name: Install

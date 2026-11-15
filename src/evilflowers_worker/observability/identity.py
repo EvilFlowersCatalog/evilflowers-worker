@@ -1,11 +1,16 @@
 """Who is reporting: the one thing a service tells the observability package (``configure``).
 
 Everything else (scope, metric prefix, default ``service.name``, Pyroscope application) derives from the short
-service name, so four services cannot drift into four conventions.
+service name, so the services cannot drift into one convention each. The only per-service vocabulary is
+``attributes``: the span names of the fields a service binds beyond the canonical set (``context.SPAN_ATTRIBUTES``).
 """
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Literal
+
+_NONE: Mapping[str, str] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -16,6 +21,8 @@ class Identity:
     version: str = "dev"
     #: ``json`` (one object per line, what Loki parses) or ``text`` (Celery's own format, for a terminal).
     log_format: Literal["json", "text"] = "json"
+    #: Short (log) name → span attribute name, over the canonical set: a key here wins over ``SPAN_ATTRIBUTES``.
+    attributes: Mapping[str, str] = field(default=_NONE)
 
     @property
     def scope(self) -> str:
@@ -31,10 +38,25 @@ class Identity:
 _identity = Identity()
 
 
-def configure(service: str, *, version: str = "dev", log_format: Literal["json", "text"] = "json") -> Identity:
-    """Set the service identity; call once, where the Celery app is created, before any telemetry is used."""
+def configure(
+    service: str,
+    *,
+    version: str = "dev",
+    log_format: Literal["json", "text"] = "json",
+    attributes: Mapping[str, str] | None = None,
+) -> Identity:
+    """Set the service identity; call once, where the Celery app is created, before any telemetry is used.
+
+    ``attributes``: span names of the service's own bound fields, or overrides of canonical ones (a catalog job binds
+    ``run_id`` as ``evilflowers.run.id``, not as an extraction run: ``context.CATALOG_JOB_ATTRIBUTES``).
+    """
     global _identity
-    _identity = Identity(service=service, version=version, log_format=log_format)
+    _identity = Identity(
+        service=service,
+        version=version,
+        log_format=log_format,
+        attributes=MappingProxyType(dict(attributes or {})),
+    )
     return _identity
 
 

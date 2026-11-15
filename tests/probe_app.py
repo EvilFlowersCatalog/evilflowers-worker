@@ -5,7 +5,10 @@
 - ``probe.doomed``: kills its own process (an OOM, as far as the parent can tell) until its delivery is past
   ``MAX_DELIVERIES``; appends each delivery number to ``PROBE_DELIVERIES``;
 - ``probe.coordinator``: sends a ``RegionsJob`` to ``probe.figures`` on the ``downstream`` queue (``CeleryPublisher``);
-- ``probe.figures``: the example leaf job (``example.EchoFigures``) against ``CATALOG_API_URL``, through ``run_job``.
+- ``probe.figures``: the example leaf job (``example.EchoFigures``) against ``CATALOG_API_URL``, through ``run_job``;
+- ``probe.convert``: the example catalog job (``example.convert``) through ``run_task``: writes its output and an
+  outcome file under ``STORAGE_PATH``, or kills its own process while ``die`` is set, until the cap writes a ``failed``
+  outcome.
 """
 
 import os
@@ -16,9 +19,9 @@ from typing import Any
 
 from evilflowers_worker.contract import RegionsJob, Route
 from evilflowers_worker.deliveries import capped
-from evilflowers_worker.runtime import JOB_TASK_OPTIONS, CeleryPublisher, create_app, run_job, runtime
+from evilflowers_worker.runtime import JOB_TASK_OPTIONS, CeleryPublisher, create_app, run_job, run_task, runtime
 from evilflowers_worker.settings import WorkerSettings
-from example import EchoFigures
+from example import ConvertRequest, EchoFigures, convert, give_up
 
 if os.environ.get("PROBE_KILL_DENIED"):
     # As on dev (2026-11-14): the parent may not signal its prefork child (PermissionError, errno 13).
@@ -66,3 +69,8 @@ def coordinator(self: Any, downstream: str) -> None:
 @app.task(name="probe.figures", bind=True, **JOB_TASK_OPTIONS)
 def figures(self: Any, **kwargs: Any) -> str:
     return run_job(self, EchoFigures, RegionsJob, kwargs)
+
+
+@app.task(name="probe.convert", bind=True, **JOB_TASK_OPTIONS)
+def convert_task(self: Any, **kwargs: Any) -> dict[str, Any]:
+    return run_task(self, convert, ConvertRequest, kwargs, on_capped=give_up)

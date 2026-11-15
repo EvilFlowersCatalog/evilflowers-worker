@@ -1,11 +1,12 @@
 [project]
 name = "evilflowers-worker"
 version = "0.1.0"
-description = "The runtime of EvilFlowers extraction workers: message contract, catalog client, Celery delivery semantics, observability"
+description = "The runtime of EvilFlowers workers: message contract, catalog client, outcome files, Celery delivery semantics, observability"
 readme = "README.md"
 authors = [{ name = "Jakub Dubec", email = "jakub.dubec@stuba.sk" }]
-requires-python = ">=3.12,<3.13"
-# No model, layout or PDF dependency: every extraction service can install it.
+# 3.12 (the extraction services, ocr-service) to 3.14 (lcpencrypt-worker); CI runs both ends.
+requires-python = ">=3.12"
+# No model, layout or PDF dependency: every service can install it.
 dependencies = [
     "celery[redis]>=5.6,<6",
     "pydantic>=2.12,<3",

@@ -5,13 +5,14 @@ Off unless the pod points it at a collector; every call here is safe either way.
 """
 
 from evilflowers_worker.observability import metrics
-from evilflowers_worker.observability.context import SPAN_ATTRIBUTES, bind
+from evilflowers_worker.observability.context import CATALOG_JOB_ATTRIBUTES, SPAN_ATTRIBUTES, bind, span_attribute
 from evilflowers_worker.observability.identity import Identity, configure, identity
 from evilflowers_worker.observability.logs import JsonFormatter
 from evilflowers_worker.observability.setup import endpoint, is_enabled, setup, shutdown
 from evilflowers_worker.observability.tracing import annotate, fail, span, untraced_http
 
 __all__ = [
+    "CATALOG_JOB_ATTRIBUTES",
     "SPAN_ATTRIBUTES",
     "Identity",
     "JsonFormatter",
@@ -26,5 +27,6 @@ __all__ = [
     "setup",
     "shutdown",
     "span",
+    "span_attribute",
     "untraced_http",
 ]

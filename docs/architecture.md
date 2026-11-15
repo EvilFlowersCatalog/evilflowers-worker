@@ -2,7 +2,8 @@
 
 Status: **proposed** (2026-11-15). Implemented first by this repository (the kit) and by
 [evilflowers-analyzer-service](https://github.com/EvilFlowersCatalog/evilflowers-analyzer-service) (the first service
-built on it). The text, image and equation services move to it through the issues listed at the end.
+built on it). The text, image and equation services move to it through the issues listed at the end, and so do the
+two catalog-job workers, ocr-service and lcpencrypt-worker (§2, evilflowers-worker#3).
 
 ## 1. Why
 
@@ -61,11 +62,26 @@ Goals:
 - **Leaf job (text, image, equation).** It does one job for one attempt. Its results and its terminal report go to
   the catalog over HTTP.
 
+**Two kinds of worker**
+- **Extraction jobs** (the roles above) stream many facts into one run: regions and paragraphs in batches of ≤ 100,
+  the catalog capping a request at 5000 regions / 1000 paragraphs, and a terminal report per job. They read the run
+  before the work and fence stale writers with `attempt`. HTTP suits that: many writes, each one answered (`409` →
+  stop).
+- **Catalog jobs** (the IP-031 job-ledger kinds: `files.ocr`, later others) have no extraction run and no attempt.
+  Each produces **one terminal outcome**, so it writes that outcome as a file next to its output, and the catalog
+  applies it on the Celery `task-succeeded` / `task-failed` event, or on its reconcile tick if the event was lost
+  (EvilFlowersCatalog#169, §3.4). The worker then needs no catalog URL, no API key and no HTTP retry logic.
+
+Both share everything below the domain: the runtime, the delivery cap, the shutdown and the observability.
+
 **Two directions**
-- **Commands flow over the broker.** Celery messages are *work orders* (`extract`, `figures`, `paragraphs`, …)
+- **Commands flow over the broker.** Celery messages are *work orders* (`extract`, `figures`, `paragraphs`, `ocr`, …)
   addressed to one queue, delivered at least once.
-- **Facts flow back over HTTP to the catalog,** the event sink: results and a terminal report per job. There is no
-  reply queue, and no service listens to another service.
+- **Facts flow back to the catalog,** the event sink, over one of two channels, by kind of worker:
+  - extraction jobs: HTTP to the ingestion API (§3.2);
+  - catalog jobs: an outcome file on the shared storage, applied on the task's Celery event (§3.4).
+
+  There is no reply queue, and no service listens to another service.
 
 This is choreography around a shared state store. It keeps the catalog the only place that decides whether a run is
 done, and it lets every worker scale on its own queue (KEDA, knowledge#43).
@@ -134,7 +150,7 @@ At-least-once, made safe by idempotency on the catalog's side:
 | Situation | What happens | Mechanism |
 |---|---|---|
 | Worker dies mid-job (OOM) | message redelivered | `acks_late` + `reject_on_worker_lost` |
-| Dies on every try | reported `failed` after `MAX_DELIVERIES` | `DeliveryCounter` (Redis, per task id; a fresh delivery resets it) |
+| Dies on every try | given up after `MAX_DELIVERIES`: an extraction job reports `failed`; a catalog job writes a `failed` outcome file and raises | `DeliveryCounter` (Redis, per task id; a fresh delivery resets it); `LeafJob` / `run_task(on_capped=…)` |
 | Scale-in mid-job | finishes within `WORKER_SOFT_SHUTDOWN_TIMEOUT`, else requeued at once | `shutdown` (warm + grace timer + fallback requeue) |
 | Run restarted meanwhile | leftover work refused, job stops early | `attempt` + `GET runs/{id}` (`superseded`) |
 | Copy of a job already reported | does nothing | `RunState.skip_reason` (`already_done`) |
@@ -142,6 +158,28 @@ At-least-once, made safe by idempotency on the catalog's side:
 
 The last row is a rule, not a default: kombu restores *every* unacked message older than the restoring consumer's own
 timeout, in any queue (EvilFlowersCatalog#120, text#9, lcpencrypt#6).
+
+### 3.4 Outcome files (catalog jobs)
+
+The contract belongs to the catalog (EvilFlowersCatalog#169); `evilflowers_worker.outcome` is the worker's half.
+
+- **Where.** The task's `outcome` kwarg: a path relative to the storage root, next to the output
+  (`catalogs/<catalog>/<entry>/ocr/<run_id>.json`). It is checked like every path a worker writes
+  (`RuntimeSettings.storage_file`): it must not escape the storage.
+- **What.** A JSON object with `run_id`, `token` and `status`, plus the kind's own fields (`OutcomeFile`, which a
+  service subclasses). Every field is written, `null` included; a field outside the contract fails in the worker.
+- **Last and atomic.** The output first, then the outcome file, which is the commit marker (`write_outcome`:
+  `.partial`, fsync, rename, fsync the directory). A crash between the two leaves no outcome, and the catalog ends the
+  run `lost`, never applied.
+- **Every status,** `failed` included: write the file, then raise, so the job keeps the domain error and the
+  traceback. Past the delivery cap too.
+- **Never on a deliberate requeue** (SIGTERM, the cold cancel). The redelivery carries the same `token` and writes the
+  outcome then. A `failed` file written on the way out would consume the token, and the catalog would refuse the
+  redelivery's outcome.
+- **The token** is minted by the catalog per run (`CapabilityTokenService`, single use) and echoed back untouched. It
+  binds the file to the run the catalog dispatched; it is not a credential of the worker.
+- **The task's return value** stays compact (`status`, a few counts): the Celery event carries a `repr` capped at 1024
+  characters, so the full outcome lives in the file.
 
 ## 4. Observability contract
 
@@ -169,10 +207,18 @@ knowledge `Cookbooks/Deploy-a-Service` §3.
   | `entry_id` | `evilflowers.entry_id` |
   | `source` | `evilflowers.source` |
   | `task_id` | `messaging.message.id` |
+
+  A service extends or overrides this map with `create_app(..., attributes=...)`. A catalog job passes
+  `observability.CATALOG_JOB_ATTRIBUTES`: its `run_id` is a run of the job ledger (`evilflowers.run.id`), not an
+  extraction run, `job_id` is the ledger's job (`evilflowers.job.id`) and `delivery` becomes
+  `evilflowers.job.delivery`. The log fields keep their short names
+  either way, so a Loki query for `run_id` finds every service.
 - **Standard metrics:** every service gets these from the kit; service-specific ones sit next to them under the same
   prefix.
   - `<service>_task_duration_seconds{celery_task_name,celery_task_state}`
-  - `<service>_job_outcome_total{job,outcome}`. Here `job` is the kind, never a batch name.
+  - `<service>_job_outcome_total{job,outcome}`. Here `job` is the kind, never a batch name. Outcomes are the
+    `jobs.Outcome` values for an extraction job, and the outcome file's `status` for a catalog job (`done`, `skipped`,
+    `failed`).
   - `<service>_catalog_retries_total{route,reason}`
   - `<service>_deliveries_capped_total`
 - **Logs:** one JSON object per line on stdout, carrying `time`, `level`, `logger`, `message`, `trace_id`, `span_id`,
@@ -185,15 +231,18 @@ knowledge `Cookbooks/Deploy-a-Service` §3.
 
 ```
 src/evilflowers_worker/
-├── settings.py        WorkerSettings: broker, catalog, storage, shutdown, delivery cap, logs (services subclass it)
+├── settings.py        RuntimeSettings: broker, storage (storage_file), shutdown, delivery cap, logs;
+│                      WorkerSettings = RuntimeSettings + the catalog ingestion API (services subclass one of them)
 ├── contract.py        message models + catalog payload models (Box, LayoutRegion, Region, JobReport, RunState, …)
 ├── catalog.py         CatalogClient for /extraction/v1, RunNotRunning / RunSuperseded / DuplicateResults
 ├── http.py            requests session (User-Agent, bearer key)
 ├── deliveries.py      DeliveryCounter (Redis): count, cap, forget on a deliberate requeue
 ├── jobs.py            LeafJob: check → extract → publish → report, outcomes, invalid-message report
-├── runtime.py         create_app(), run_job(): Celery config, queues, telemetry, shutdown; Publisher
+├── outcome.py         OutcomeFile, atomic_write, write_outcome: a catalog job's outcome file (§3.4)
+├── runtime.py         create_app(), run_job() (leaf jobs), run_task() (anything else): Celery config, queues,
+│                      telemetry, shutdown; Publisher
 ├── shutdown.py        SIGTERM: warm shutdown, grace timer, cold cancel, fallback requeue
-├── testing.py         FakeCatalog, RecordingPublisher, StubCatalogServer, WorkerProcess
+├── testing.py         FakeCatalog, RecordingPublisher, StubCatalogServer, assert_outcome, WorkerProcess
 └── observability/     otel setup, spans, metrics (Instrument), JSON logs, bind(), Pyroscope, Celery signals
 ```
 
@@ -220,11 +269,28 @@ A fix here reaches a service when it bumps `rev` (and runs `uv lock`); nothing c
    `testing.StubCatalogServer` (`tests/test_runtime.py` here, the analyzer's `tests/test_end_to_end.py` for a whole
    run).
 
+### A catalog job, step by step
+
+1. `settings.py`: `class Settings(RuntimeSettings)`. No `catalog_*` field: the worker holds no catalog credential.
+2. `outcome`: `class OcrOutcome(OutcomeFile)` with the kind's fields and `status: Literal["done", "skipped",
+   "failed"]`.
+3. `worker.py`: `app = runtime.create_app("ocr", settings, include=[...], queues=[settings.queue],
+   routes={"evilflowers_ocr_worker.*": settings.queue}, attributes=observability.CATALOG_JOB_ATTRIBUTES)`. The task
+   names are a contract with the catalog, so the routes follow them.
+4. `tasks.py`: `@shared_task(name=..., bind=True, time_limit=..., **runtime.JOB_TASK_OPTIONS)` whose body is
+   `return runtime.run_task(self, jobs.run, OcrRequest, kwargs, on_capped=jobs.give_up)`.
+   - `jobs.run(message, delivery)` writes the output, then `write_outcome(...)`, and returns a compact dict;
+   - `jobs.give_up(message, delivery)` writes a `failed` outcome and raises;
+   - an invalid message raises by default (`on_invalid`): without `outcome`/`token` there is nowhere to write.
+5. Tests: `testing.assert_outcome` (fields, token, written after the output); the real worker through
+   `testing.WorkerProcess` for the cap and for a scale-in that leaves no outcome (`tests/test_runtime.py`, `probe.convert`;
+   `tests/example.py` is the reference).
+
 ## 6. Roadmap
 
 | Step | Where |
 |---|---|
-| Kit | this repository (`master` @ `ae8e238`) |
+| Kit | this repository (`master` @ `bdc3336`; catalog jobs on branch `catalog-jobs`, evilflowers-worker#3) |
 | Analyzer on the kit | evilflowers-analyzer-service (pinned to `ae8e238`) |
 | text, image, equation adopt the kit | text-service#16, #17 (+ #15 `outline`), image-service#5, equation-service#7 |
 | Housekeeping: README, tooling, CI with Redis | evilflowers-worker#1 |
@@ -232,3 +298,18 @@ A fix here reaches a service when it bumps `rev` (and runs `uv lock`); nothing c
 | Task messages as AsyncAPI next to the OpenAPI spec | evilflowers-protocol#1 |
 | Telemetry, settings and manifest changes; worker liveness without a port; the denied kill on `control` | knowledge#56 |
 | Analyzer OOM at 6Gi | knowledge#55 |
+| Catalog jobs on the kit: outcome files, `RuntimeSettings`, `run_task`, attributes, Python 3.14 | evilflowers-worker#3 |
+| The `files.ocr` outcome-file contract (catalog side, worker side) | EvilFlowersCatalog#169, ocr-service#5 |
+| ocr-service and lcpencrypt-worker adopt the kit | ocr-service#6, lcpencrypt-worker#8 |
+
+## 7. Open questions
+
+- **A static catalog key for extraction?** EvilFlowersCatalog#169 sets a rule for catalog jobs: a worker that ever
+  needs an HTTP callback authenticates with its run's capability token, never with a static service API key. Every
+  extraction worker still holds a static `CATALOG_API_KEY` (`extraction.ingest_extraction`). Either the rule is
+  scoped to job-ledger kinds, because extraction writes many times per run and `attempt` already fences stale
+  writers, or the catalog mints a per-run token into `ExtractRequest` (forwarded by the analyzer in every job
+  message) and the key goes away. That is a catalog decision first, then a change here (`JobMessage`,
+  `CatalogClient`).
+- **One spelling for the acquisition attribute.** The kit has `evilflowers.acquisition_id`, ocr-service
+  `evilflowers.acquisition.id`. Settle it with the dashboards (knowledge#56) before ocr-service adopts the kit.
