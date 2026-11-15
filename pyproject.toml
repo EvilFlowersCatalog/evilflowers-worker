@@ -1,0 +1,39 @@
+[project]
+name = "evilflowers-worker"
+version = "0.1.0"
+description = "The runtime of EvilFlowers extraction workers: message contract, catalog client, Celery delivery semantics, observability"
+readme = "README.md"
+authors = [{ name = "Jakub Dubec", email = "jakub.dubec@stuba.sk" }]
+requires-python = ">=3.12,<3.13"
+# No model, layout or PDF dependency: every extraction service can install it.
+dependencies = [
+    "celery[redis]>=5.6,<6",
+    "pydantic>=2.12,<3",
+    "pydantic-settings>=2.6,<3",
+    "redis>=5",
+    "requests>=2.32",
+    # The code uses the API only; a no-op without the `otel` extra. One release train with the catalog.
+    "opentelemetry-api==1.45.2",
+]
+
+[project.optional-dependencies]
+# OTLP/HTTP to the node's Alloy; SDK/exporter 1.x and contrib 0.yb0 move together (as in the catalog).
+otel = [
+    "opentelemetry-sdk==1.45.2",
+    "opentelemetry-exporter-otlp-proto-http==1.45.2",
+    "opentelemetry-instrumentation-celery==0.66b2",
+    "opentelemetry-instrumentation-requests==0.66b2",
+    "opentelemetry-instrumentation-system-metrics==0.66b2",
+]
+# Pyroscope SDK: Python frames the node's eBPF profiler cannot unwind; on only with PYROSCOPE_SERVER_ADDRESS.
+profiling = [
+    "pyroscope-io==1.4.0",
+    "pyroscope-otel==1.1.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evilflowers_worker"]
