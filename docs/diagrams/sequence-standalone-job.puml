@@ -1,0 +1,32 @@
+@startuml sequence-standalone-job
+!include elvira.iuml
+' What: a standalone job reports to whatever orchestrator sent it, through its outcome file and Celery's link / link_error callbacks, without a result backend; a deliberate requeue fires neither.
+' Kind: UML sequence diagram, one standalone job. Scope: the kit's side; the orchestrator's ledger and promotion are drawn as one step.
+' Source: issue evilflowers-worker#5 (probe results, 2026-11-16); evilflowers-books-digitalizer docs/design/target-architecture.md §2.3–§2.5
+
+title A standalone job and its callbacks (evilflowers-worker#5, 2026-11-16)
+
+participant "orchestrator\n(e.g. digitalizer)" as orch <<proposed>>
+queue "<service>.standalone\n(Redis list)" as q
+participant "kit worker\nrun_task(StandaloneJob)" as worker <<focus>>
+database "STORAGE_PATH\n<item>/_studio/jobs/<job>/" as storage
+queue "digitalizer.portal\n(callback queue)" as cbq
+
+orch -> q : send_task(name, kwargs=message.kwargs(), queue,\nlink + link_error = standalone_callbacks(app, done, failed, queue, job_id))
+q -> worker : deliver (acks_late)
+worker -> storage : prepare_output(): mkdir, path-checked
+alt done
+  worker -> storage : outputs, then outcome file (last, atomic)
+  worker -[$accent_msg()]> cbq : <b>link</b>: job_done(<compact return value>, job_id=…)
+else raises, or past MAX_DELIVERIES (on_capped writes a failed outcome, then raises)
+  worker -> storage : failed outcome file (none for an invalid message)
+  worker -[$accent_msg()]> cbq : <b>link_error</b>: job_failed(<task id>, job_id=…)
+else SIGTERM: deliberate requeue
+  worker -> q : requeued, same token; no outcome, no callback
+end
+cbq -> orch : job_done / job_failed (an ordinary task on its own queue)
+orch -> storage : read the outcome, check the token, promote the job's output into the item
+
+caption No result backend: Celery sends the callback as a message (only chords need a backend). The errback is declared with bind=True,\nso it is always applied as a task with the failed task id. The return value stays compact: it is the link's first argument.
+footer ELVIRA · FIIT STU · evilflowers-worker · docs/diagrams/sequence-standalone-job.puml
+@enduml

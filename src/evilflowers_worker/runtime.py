@@ -11,7 +11,8 @@
 - telemetry and JSON logs (``observability``).
 
 Nobody waits for a task's result (every job reports to the catalog, or leaves an outcome file), so there is no result
-backend.
+backend. A standalone job's orchestrator learns of the end through ``link`` / ``link_error`` callbacks
+(``standalone_callbacks``), which need none.
 
 A task body is one of two calls (docs/architecture.md §2):
 
@@ -28,7 +29,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from celery import Celery, Task
+from celery import Celery, Signature, Task
 from kombu import Exchange, Queue
 from pydantic import BaseModel, ValidationError
 
@@ -207,6 +208,41 @@ def run_task[M: BaseModel, R](
             )
             return on_capped(message, delivery)
         return handler(message, delivery)
+
+
+def standalone_callbacks(
+    app: Celery, *, done: str, failed: str, queue: str, job_id: str, **bound: Any
+) -> dict[str, Signature]:
+    """``link`` and ``link_error`` for a standalone job, sent by the orchestrator (docs/architecture.md §2)::
+
+        app.send_task(route.task, kwargs=message.kwargs(), queue=route.queue,
+                      **standalone_callbacks(app, done="digitalizer.job_done", failed="digitalizer.job_failed",
+                                             queue="digitalizer.portal", job_id=job.id))
+
+    No result backend is needed: Celery sends each callback as an ordinary message to ``queue``, which the
+    orchestrator consumes. ``tests/test_runtime.py`` shows, against Redis: ``link`` on success; ``link_error`` on a
+    raise, on an invalid message (no outcome file then) and past the delivery cap; neither on a deliberate requeue
+    (SIGTERM). The probe on evilflowers-worker#5 adds: neither on a ``retry``; a worker killed mid-task fires one on
+    the redelivery's outcome.
+
+    - The worker sends the callback on its own broker: ``queue`` must be on the same Redis db as the job's queue.
+    - At least once: Celery sends ``link`` from the task, before the late acknowledgement, so a worker that dies in
+      between sends it again on the redelivery. ``done`` and ``failed`` must be idempotent (check the job's state).
+
+    - ``done(result, job_id=…)``: applied with the task's **return value** as its first argument, so the return value
+      stays compact (the outcome file holds the rest).
+    - ``failed(task_id, job_id=…)``: the single-argument errback form, the one the Celery docs prescribe for tasks
+      sent by name. **Declare it with** ``bind=True`` (``def job_failed(self, task_id, job_id)``): an errback with
+      more than one positional parameter that is registered in the failing app is called directly as
+      ``(request, exc, traceback)`` instead, and fails with ``TypeError``.
+
+    ``bound`` adds further keyword arguments to both callbacks.
+    """
+    kwargs = {"job_id": job_id, **bound}
+    return {
+        "link": app.signature(done, kwargs=kwargs, queue=queue),
+        "link_error": app.signature(failed, kwargs=kwargs, queue=queue),
+    }
 
 
 class Publisher(Protocol):

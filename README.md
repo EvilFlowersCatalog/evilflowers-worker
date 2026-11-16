@@ -4,9 +4,12 @@ The runtime of the EvilFlowers workers: the message contract, the catalog client
 semantics and the observability, in one package. The design is in
 [`docs/architecture.md`](docs/architecture.md).
 
-It serves two kinds of worker (§2 of the design):
+It serves three kinds of worker (§2 of the design):
 - **extraction jobs** (analyzer, text, image, equation), which report to the catalog's ingestion API;
-- **catalog jobs** (ocr, lcpencrypt), which leave one outcome file for the catalog and hold no catalog credential.
+- **catalog jobs** (ocr, lcpencrypt), which leave one outcome file for the catalog and hold no catalog credential;
+- **standalone jobs**, which run without the catalog for any orchestrator (the books digitalizer). They leave an
+  outcome file in a job-scoped directory, and the orchestrator learns the end from Celery `link` / `link_error`
+  callbacks.
 
 It has no model, layout or PDF dependency and runs on Python 3.12 to 3.14, so every service can depend on it:
 
@@ -30,11 +33,11 @@ The image installs `otel` and `profiling`. Without them, telemetry and profiling
 
 | Module | What it gives a service |
 |---|---|
-| `contract` | `ExtractRequest`, `ParagraphsJob`, `RegionsJob` (commands); `Region` (with the optional decision fields `band`, `p`, `score`, `decision`, `decider_model`, …), `Paragraph`, `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
+| `contract` | `ExtractRequest`, `ParagraphsJob`, `RegionsJob`, `StandaloneJob` (`input_paths()`, `prepare_output()`, `output_file()`) (commands); `Region` (with the optional decision fields `band`, `p`, `score`, `decision`, `decider_model`, …), `Paragraph`, `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
 | `catalog` | `CatalogClient`: `run()`, `start()`, `regions()`, `paragraphs()`, `job()`; `?attempt=`; `RunNotRunning` / `RunSuperseded` / `DuplicateResults` / `CatalogRefused` (a refusal with the catalog's body) |
 | `jobs` | `LeafJob`: delivery cap, check, `extract`, `publish`, terminal report, `recheck()` for long jobs |
 | `outcome` | `OutcomeFile`, `atomic_write`, `write_outcome`: a catalog job's outcome file, last and atomic |
-| `runtime` | `create_app()`, `JOB_TASK_OPTIONS`, `run_job()` (leaf jobs), `run_task()` (anything else), `Publisher` / `CeleryPublisher`, `runtime().delivery(task)` |
+| `runtime` | `create_app()`, `JOB_TASK_OPTIONS`, `run_job()` (leaf jobs), `run_task()` (anything else), `standalone_callbacks()` (an orchestrator's `link` / `link_error`), `Publisher` / `CeleryPublisher`, `runtime().delivery(task)` |
 | `deliveries` | `DeliveryCounter` and `capped()`: the Redis count behind the delivery cap |
 | `shutdown` | SIGTERM: warm shutdown, grace timer, cold cancel, fallback requeue |
 | `observability` | `configure`, `bind`, `span`, `annotate`, `fail`, `untraced_http`, `metrics.Instrument`, JSON logs, Pyroscope; `CATALOG_JOB_ATTRIBUTES` |
@@ -123,6 +126,41 @@ def ocr(self, **kwargs) -> dict:
 
 Never write the outcome when the worker is stopped (SIGTERM, the cold cancel): the redelivery carries the same token.
 
+## A standalone job
+
+```python
+# jobs.py: the shared fields (run_id, job, token, inputs, output_dir, outcome) + the service's own
+class HocrJob(StandaloneJob):
+    language: str = "slk"
+
+
+def run(message: HocrJob, delivery: int) -> dict:
+    message.prepare_output(settings)                       # <item>/_studio/jobs/<job>/, path-checked
+    for leaf in message.input_paths(settings):
+        atomic_write(message.output_file(settings, f"{leaf.stem}.hocr"), ocr(leaf, message.language))
+    write_outcome(settings, message.outcome, HocrOutcome(run_id=..., token=message.token, status="done", ...))
+    return {"status": "done", "pages": n}                  # the orchestrator's `link` receives this: keep it compact
+
+
+# tasks.py: the same run_task as a catalog job (on_capped writes a failed outcome and raises → link_error)
+@shared_task(name="evilflowers_ocr_worker.standalone.hocr", bind=True, **runtime.JOB_TASK_OPTIONS)
+def hocr(self, **kwargs) -> dict:
+    return runtime.run_task(self, jobs.run, HocrJob, kwargs, on_capped=jobs.give_up)
+
+
+# the orchestrator's side: no result backend; the callbacks arrive on its own queue
+app.send_task("evilflowers_ocr_worker.standalone.hocr", kwargs=message.kwargs(), queue="evilflowers_ocr.standalone",
+              **runtime.standalone_callbacks(app, done="digitalizer.job_done", failed="digitalizer.job_failed",
+                                             queue="digitalizer.portal", job_id=job.id))
+
+
+@app.task(name="digitalizer.job_failed", bind=True)  # bind=True: always applied as a task with the task id
+def job_failed(self, task_id: str, job_id: str): ...
+```
+
+Never set `priority` on a message for a kit queue: a kit worker does not poll kombu's priority lists, so the message
+would be stranded (docs/architecture.md §3.3).
+
 ## Tests
 
 For the tests:
@@ -130,5 +168,10 @@ For the tests:
 - run the real worker with `testing.WorkerProcess` against Redis and `testing.StubCatalogServer`, as
   `tests/test_runtime.py` does here and the analyzer's `tests/test_end_to_end.py` does for a whole run.
 
-`tests/example.py` is a complete leaf job and a complete catalog job, and `tests/probe_app.py` is a complete worker.
-Both use nothing outside this package.
+`tests/example.py` is a complete leaf job, a complete catalog job and a complete standalone job, and
+`tests/probe_app.py` is a complete worker. Both use nothing outside this package.
+
+**macOS, Python 3.14:** the prefork pool starts its children by spawn, and billiard can fail every task with
+`ValueError: not enough values to unpack (expected 3, got 0)` before the task body runs. Celery then fires
+`link_error`, which looks like a failing job. Run a local worker with `--pool=solo`. The Linux images fork and are not
+affected.

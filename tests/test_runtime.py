@@ -10,6 +10,8 @@ set), where a missing Redis is a failure: these tests are the only guard of the 
 shutdown uses.
 """
 
+import base64
+import json
 import os
 import signal
 import time
@@ -18,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from evilflowers_worker.deliveries import DeliveryCounter
-from evilflowers_worker.runtime import create_app
+from evilflowers_worker.runtime import create_app, standalone_callbacks
 from evilflowers_worker.settings import WorkerSettings
 from evilflowers_worker.testing import StubCatalogServer, WorkerProcess, assert_outcome, redis_client, wait_for
 
@@ -304,3 +306,116 @@ def test_a_catalog_job_stopped_by_scale_in_leaves_no_outcome_and_is_requeued(pro
     assert not (storage / "catalogs/c/e/ocr").exists()
     (requeued,) = worker.queued()
     assert WorkerProcess.kwargs(requeued)["token"] == "tok-1"
+
+
+# -- Standalone jobs: link / link_error without a result backend (evilflowers-worker#5) ---------------------------
+
+
+@pytest.fixture
+def standalone(probe, tmp_path):
+    """``(worker, storage, send, callbacks)``: a probe worker, its storage, a sender with both callbacks attached,
+    and a reader of the callback queue (nobody consumes it: the orchestrator's worker would)."""
+    storage = tmp_path / "data"
+    (storage / "items/b1/leaves").mkdir(parents=True)
+    (storage / "items/b1/leaves/0001.txt").write_text("page one")
+    (storage / "items/b1/leaves/0002.txt").write_text("page two")
+    worker = probe(STORAGE_PATH=str(storage), MAX_DELIVERIES="2", WORKER_SOFT_SHUTDOWN_TIMEOUT="2")
+    callback_queue = f"{worker.queue}-portal"
+
+    def send(**extra: object) -> str:
+        kwargs = {
+            "run_id": "run-1",
+            "job": "job-7",
+            "token": "tok-7",
+            "inputs": ["items/b1/leaves/0001.txt", "items/b1/leaves/0002.txt"],
+            "output_dir": "items/b1/_studio/jobs/job-7/",
+            "outcome": "items/b1/_studio/jobs/job-7.json",
+            **extra,
+        }
+        callbacks = standalone_callbacks(
+            worker.producer(), done="probe.job_done", failed="probe.job_failed", queue=callback_queue, job_id="job-7"
+        )
+        return worker.send_task("probe.standalone", kwargs, **callbacks)
+
+    def callbacks() -> list[dict]:
+        return worker.queued(callback_queue)
+
+    worker.wait_ready()
+    try:
+        yield worker, storage, send, callbacks
+    finally:
+        worker.redis.delete(callback_queue)
+
+
+def test_link_fires_on_success_with_the_return_value(standalone):
+    worker, storage, send, callbacks = standalone
+    task_id = send()
+
+    assert wait_for(lambda: len(callbacks()) == 1, 30), "link never fired"
+    (done,) = callbacks()
+    assert done["headers"]["task"] == "probe.job_done"
+    assert WorkerProcess.args(done) == [{"status": "done", "outputs": 2}]
+    assert WorkerProcess.kwargs(done) == {"job_id": "job-7"}
+    # The outcome was written before the callback, the outputs before the outcome.
+    assert_outcome(storage, "items/b1/_studio/jobs/job-7.json", run_id="run-1", token="tok-7", status="done",
+                   after="items/b1/_studio/jobs/job-7/0002.txt")  # fmt: skip
+    assert (storage / "items/b1/_studio/jobs/job-7/0001.txt").read_text() == "PAGE ONE"
+    assert wait_for(lambda: worker.redis.llen(worker.queue) == 0 and task_id not in worker.unacked_ids(), 30)
+
+
+def test_link_error_fires_on_a_raised_task_with_the_task_id(standalone):
+    _worker, storage, send, callbacks = standalone
+    task_id = send(fail=True)
+
+    assert wait_for(lambda: len(callbacks()) == 1, 30), "link_error never fired"
+    (failed,) = callbacks()
+    assert failed["headers"]["task"] == "probe.job_failed"
+    assert WorkerProcess.args(failed) == [task_id]
+    assert WorkerProcess.kwargs(failed) == {"job_id": "job-7"}
+    assert_outcome(storage, "items/b1/_studio/jobs/job-7.json", token="tok-7", status="failed")
+
+
+def test_link_error_fires_for_an_invalid_message_with_no_outcome_file(standalone):
+    """``run_task``'s default raises the ValidationError before anything is written: the orchestrator gets
+    ``job_failed`` and finds no outcome file."""
+    _worker, storage, send, callbacks = standalone
+    task_id = send(token="")
+
+    assert wait_for(lambda: len(callbacks()) == 1, 30), "link_error never fired"
+    (failed,) = callbacks()
+    assert failed["headers"]["task"] == "probe.job_failed" and WorkerProcess.args(failed) == [task_id]
+    assert not (storage / "items/b1/_studio/jobs/job-7.json").exists()
+
+
+def test_link_error_fires_once_past_the_delivery_cap(standalone):
+    worker, storage, send, callbacks = standalone
+    task_id = send(die=True)
+
+    assert wait_for(lambda: len(callbacks()) == 1, 90), "link_error never fired past the cap"
+    (failed,) = callbacks()
+    assert failed["headers"]["task"] == "probe.job_failed" and WorkerProcess.args(failed) == [task_id]
+    outcome = assert_outcome(storage, "items/b1/_studio/jobs/job-7.json", token="tok-7", status="failed")
+    assert outcome["error"] == "gave up after 2 deliveries"
+    # Acknowledged: neither on the queue nor held.
+    assert wait_for(lambda: worker.redis.llen(worker.queue) == 0 and task_id not in worker.unacked_ids(), 30)
+    # The deliveries the worker died in fired nothing: one callback in all.
+    assert len(callbacks()) == 1
+
+
+def test_neither_callback_fires_on_a_deliberate_requeue(standalone):
+    worker, storage, send, callbacks = standalone
+    task_id = send(seconds=600)
+    assert wait_for(lambda: task_id in worker.unacked_ids(), 30), "the job never started"
+
+    worker.signal(signal.SIGTERM)
+
+    assert wait_for(lambda: worker.redis.llen(worker.queue) == 1, 30), "the job was not requeued"
+    assert worker.wait(timeout=30) is not None
+    assert callbacks() == []
+    assert not (storage / "items/b1/_studio/jobs/job-7.json").exists()
+    (requeued,) = worker.queued()
+    assert WorkerProcess.kwargs(requeued)["token"] == "tok-7"
+    # The requeued message still carries both callbacks for the redelivery.
+    assert requeued["headers"]["task"] == "probe.standalone"
+    assert json.loads(base64.b64decode(requeued["body"]))[2]["callbacks"]
+    assert json.loads(base64.b64decode(requeued["body"]))[2]["errbacks"]

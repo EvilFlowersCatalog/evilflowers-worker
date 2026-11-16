@@ -62,7 +62,7 @@ Goals:
 - **Leaf job (text, image, equation).** It does one job for one attempt. Its results and its terminal report go to
   the catalog over HTTP.
 
-**Two kinds of worker**
+**Three kinds of worker**
 - **Extraction jobs** (the roles above) stream many facts into one run: regions and paragraphs in batches of ≤ 100,
   the catalog capping a request at 5000 regions / 1000 paragraphs, and a terminal report per job. They read the run
   before the work and fence stale writers with `attempt`. HTTP suits that: many writes, each one answered (`409` →
@@ -72,16 +72,55 @@ Goals:
   applies it on the Celery `task-succeeded` / `task-failed` event, or on its reconcile tick if the event was lost
   (EvilFlowersCatalog#169, §3.4). The worker then needs no catalog URL, no API key and no HTTP retry logic.
 
-Both share everything below the domain: the runtime, the delivery cap, the shutdown and the observability.
+- **Standalone jobs** (evilflowers-worker#5) run without the catalog. The books digitalizer runs the extractors (ocr,
+  analyzer, equation, image) and its own scan and render services this way; its orchestrator is the system of record,
+  and any other orchestrator could be. Each job is a `contract.StandaloneJob`: `run_id`, `job`, `token`, `inputs`,
+  `output_dir` and `outcome`, plus the service's own options in a subclass. The worker reads its inputs and writes into
+  a **job-scoped** output directory (`<item>/_studio/jobs/<job>/`, through `prepare_output()` / `output_file()`, which
+  check every path against `STORAGE_PATH`). It writes the outcome file last (§3.4), returns a compact summary, and
+  holds no database or catalog credential. It runs through `runtime.run_task`, the same as a catalog job.
+
+  The orchestrator learns that the job ended from **Celery callbacks**, not from events or a result backend:
+
+  ![A standalone job](diagrams/sequence-standalone-job.svg)
+
+  - It sends `send_task(name, kwargs=message.kwargs(), queue=…, **runtime.standalone_callbacks(app, done=…,
+    failed=…, queue=…, job_id=…))`.
+  - On success Celery sends `done(<return value>, job_id=…)` to the orchestrator's queue, so the return value stays
+    compact.
+  - On a raised task, Celery sends `failed(<task id>, job_id=…)`. That covers `on_capped` past the delivery cap, and an
+    invalid message, which arrives with no outcome file. This single-argument form is the one the Celery docs
+    prescribe for tasks sent by name. Declare the errback with `bind=True`: an errback with more than one positional
+    parameter that is registered in the failing app is called directly as `(request, exc, traceback)` instead.
+  - Neither fires on a deliberate requeue (SIGTERM).
+
+  Callbacks are ordinary messages, so **no result backend** is needed (only chords need one).
+  `tests/test_runtime.py` shows these cases against a real Redis. The probe on evilflowers-worker#5 adds two more:
+  neither fires on a `retry`, and a worker killed mid-task fires one later, on the redelivery's outcome.
+
+  What the orchestrator must allow for:
+  - **Same Redis db.** The worker sends the callback on its own broker, so the callback queue must live on the job's
+    Redis db.
+  - **At least once.** Celery sends `link` from the task before the late acknowledgement (`celery.app.trace`), so a
+    worker that dies in between sends it again on the redelivery. `job_done` and `job_failed` must be idempotent.
+  - **`job_failed` without an outcome** means the message was invalid (or the worker raised before writing anything):
+    fail the job, never re-send it unchanged.
+
+  The orchestrator then reads the outcome file, checks the token, and promotes the job's output into the item. A
+  reconcile tick of its own covers a lost callback.
+
+All three share everything below the domain: the runtime, the delivery cap, the shutdown and the observability.
 
 **Two directions**
 - **Commands flow over the broker.** Celery messages are *work orders* (`extract`, `figures`, `paragraphs`, `ocr`, …)
   addressed to one queue, delivered at least once.
-- **Facts flow back to the catalog,** the event sink, over one of two channels, by kind of worker:
-  - extraction jobs: HTTP to the ingestion API (§3.2);
-  - catalog jobs: an outcome file on the shared storage, applied on the task's Celery event (§3.4).
+- **Facts flow back to the system of record** over one of three channels, by kind of worker:
+  - extraction jobs: HTTP to the catalog's ingestion API (§3.2);
+  - catalog jobs: an outcome file on the shared storage, applied on the task's Celery event (§3.4);
+  - standalone jobs: an outcome file, which the orchestrator reads when its `link` / `link_error` callback arrives.
 
-  There is no reply queue, and no service listens to another service.
+  There is no reply queue of the workers' own, and no service listens to another service. A standalone job's
+  callbacks are messages that Celery itself sends to the orchestrator's queue.
 
 This is choreography around a shared state store. It keeps the catalog the only place that decides whether a run is
 done, and it lets every worker scale on its own queue (KEDA, knowledge#43).
@@ -114,7 +153,8 @@ Rules:
 1. **Additive only.** A new field is optional, and consumers ignore what they do not know (`extra="ignore"` /
    `**_`). Removing or retyping a field is a new task name.
 2. **`None` is not sent.** Empty lists are sent: `regions: []` means "no regions, report anyway".
-3. **Every job message carries `run_id`, `source`, `output_dir`, and `attempt` once the run has one.**
+3. **Every extraction job message carries `run_id`, `source`, `output_dir`, and `attempt` once the run has one.** A
+   standalone job carries `run_id`, `job`, `token`, `inputs`, `output_dir` and `outcome` instead (`StandaloneJob`, §2).
 4. **A batch job carries `job`:** `<kind>:<first>-<last>`, zero-padded, at most 30 characters (the catalog's limit).
 5. **Commands are sent from inside the consuming task**, so Celery stamps `parent_id`/`root_id` (the catalog's job
    ledger attributes child tasks by `parent_id`) and the OTel instrumentation injects `traceparent`.
@@ -163,9 +203,21 @@ At-least-once, made safe by idempotency on the catalog's side:
 The last row is a rule, not a default: kombu restores *every* unacked message older than the restoring consumer's own
 timeout, in any queue (EvilFlowersCatalog#120, text#9, lcpencrypt#6).
 
-### 3.4 Outcome files (catalog jobs)
+**Producers must not set `priority` on messages for kit queues, and every app on a Redis db uses the same transport
+options.** With priority emulation (`queue_order_strategy: priority`, `priority_steps: range(10)`), a message sent
+with `priority=5` goes to the list `<queue>\x06\x165`. A kit worker polls only kombu's default steps (0/3/6/9), so it
+never reads that list: the message is stranded (shown on 2026-11-16, evilflowers-worker#5). KEDA and redis_exporter,
+which read the plain `<queue>` list, don't see it either. Interactive work gets queues of its own
+(`<service>.standalone.interactive`), not a priority.
 
-The contract belongs to the catalog (EvilFlowersCatalog#169); `evilflowers_worker.outcome` is the worker's half.
+### 3.4 Outcome files (catalog jobs and standalone jobs)
+
+The pattern is not catalog-specific. For a catalog job the contract belongs to the catalog (EvilFlowersCatalog#169).
+For a standalone job it belongs to the orchestrator that sent the job; for the digitalizer that is
+evilflowers-books-digitalizer `docs/design/target-architecture.md` §2. `evilflowers_worker.outcome` is the worker's
+half either way, and the rules below hold for both. A standalone job's outputs go to its job-scoped `output_dir`, which
+the orchestrator promotes only after it has checked the outcome's token. Outputs of a superseded or failed job are
+never promoted.
 
 - **Where.** The task's `outcome` kwarg: a path relative to the storage root, next to the output
   (`catalogs/<catalog>/<entry>/ocr/<run_id>.json`). It is checked like every path a worker writes
@@ -239,14 +291,14 @@ knowledge `Cookbooks/Deploy-a-Service` §3.
 src/evilflowers_worker/
 ├── settings.py        RuntimeSettings: broker, storage (storage_file), shutdown, delivery cap, logs;
 │                      WorkerSettings = RuntimeSettings + the catalog ingestion API (services subclass one of them)
-├── contract.py        message models + catalog payload models (Box, LayoutRegion, Region, JobReport, RunState, …)
+├── contract.py        message models (incl. StandaloneJob) + catalog payload models (Box, LayoutRegion, Region, …)
 ├── catalog.py         CatalogClient for /extraction/v1, RunNotRunning / RunSuperseded / DuplicateResults / CatalogRefused
 ├── http.py            requests session (User-Agent, bearer key)
 ├── deliveries.py      DeliveryCounter (Redis): count, cap, forget on a deliberate requeue
 ├── jobs.py            LeafJob: check → extract → publish → report, outcomes, invalid-message report
 ├── outcome.py         OutcomeFile, atomic_write, write_outcome: a catalog job's outcome file (§3.4)
 ├── runtime.py         create_app(), run_job() (leaf jobs), run_task() (anything else): Celery config, queues,
-│                      telemetry, shutdown; Publisher
+│                      telemetry, shutdown; Publisher; standalone_callbacks() (link / link_error)
 ├── shutdown.py        SIGTERM: warm shutdown, grace timer, cold cancel, fallback requeue
 ├── testing.py         FakeCatalog, RecordingPublisher, StubCatalogServer, assert_outcome, WorkerProcess
 ├── observability/     otel setup, spans, metrics (Instrument), JSON logs, bind(), Pyroscope, Celery signals
@@ -365,6 +417,7 @@ and `JUDGE_BREAKER_*`.
 | `judges` extra: shared clients and question schemas (§5.1) | evilflowers-worker#6 |
 | Thresholds and latency of decider / decider-vision | knowledge#65 |
 | image-service's decider call on the extra | image-service#6 |
+| Standalone jobs: `StandaloneJob`, `standalone_callbacks`, link / link_error without a result backend | evilflowers-worker#5 |
 | `Region` decision fields (`band`, `p`, `score`, `decision`, `decider_model`, `review_outcome`, `grounded_share`, `signals`) | evilflowers-worker#7, EvilFlowersCatalog#189 |
 
 ## 7. Open questions

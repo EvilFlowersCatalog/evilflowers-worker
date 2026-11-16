@@ -8,7 +8,9 @@
 - ``probe.figures``: the example leaf job (``example.EchoFigures``) against ``CATALOG_API_URL``, through ``run_job``;
 - ``probe.convert``: the example catalog job (``example.convert``) through ``run_task``: writes its output and an
   outcome file under ``STORAGE_PATH``, or kills its own process while ``die`` is set, until the cap writes a ``failed``
-  outcome.
+  outcome;
+- ``probe.standalone``: the example standalone job (``example.shout``) through ``run_task``; the test attaches
+  ``link`` / ``link_error`` and reads the callbacks off their queue (no result backend).
 """
 
 import os
@@ -21,7 +23,7 @@ from evilflowers_worker.contract import RegionsJob, Route
 from evilflowers_worker.deliveries import capped
 from evilflowers_worker.runtime import JOB_TASK_OPTIONS, CeleryPublisher, create_app, run_job, run_task, runtime
 from evilflowers_worker.settings import WorkerSettings
-from example import ConvertRequest, EchoFigures, convert, give_up
+from example import ConvertRequest, EchoFigures, ShoutJob, convert, give_up, shout, shout_give_up
 
 if os.environ.get("PROBE_KILL_DENIED"):
     # As on dev (2026-11-14): the parent may not signal its prefork child (PermissionError, errno 13).
@@ -74,3 +76,10 @@ def figures(self: Any, **kwargs: Any) -> str:
 @app.task(name="probe.convert", bind=True, **JOB_TASK_OPTIONS)
 def convert_task(self: Any, **kwargs: Any) -> dict[str, Any]:
     return run_task(self, convert, ConvertRequest, kwargs, on_capped=give_up)
+
+
+# The orchestrator's callbacks (`probe.job_done`, `probe.job_failed`) are deliberately not registered here: a kit
+# service never registers them; the orchestrator's own worker consumes them from its queue.
+@app.task(name="probe.standalone", bind=True, **JOB_TASK_OPTIONS)
+def standalone_task(self: Any, **kwargs: Any) -> dict[str, Any]:
+    return run_task(self, shout, ShoutJob, kwargs, on_capped=shout_give_up)

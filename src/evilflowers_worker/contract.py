@@ -14,9 +14,12 @@ Every model validates at the edge: a consumer builds its message with ``model_va
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+from evilflowers_worker.settings import RuntimeSettings
 
 #: The catalog stores at most this much of a job's error message.
 MAX_ERROR_LENGTH = 2000
@@ -141,6 +144,54 @@ class RegionsJob(JobMessage):
     """
 
     regions: list[LayoutRegion] = Field(default_factory=list)
+
+
+class StandaloneJob(Message):
+    """A catalog-free job: one job of any orchestrator's run (docs/architecture.md §2, evilflowers-worker#5).
+
+    The orchestrator (the books digitalizer, or any other) is the system of record. The worker reads ``inputs``,
+    writes into its job-scoped ``output_dir``, writes the outcome file last (``outcome.write_outcome``) and returns
+    a compact summary. It holds no database or catalog credential. The orchestrator learns that the job ended from
+    the ``link`` / ``link_error`` callbacks it attached (``runtime.standalone_callbacks``), reads the outcome, checks
+    the token and promotes the output.
+
+    A service subclasses it for its own options. Run it through ``runtime.run_task``.
+    """
+
+    #: The orchestrator's run.
+    run_id: str = Field(min_length=1)
+    #: The orchestrator's job (its ledger id); names the job-scoped output directory.
+    job: str = Field(min_length=1)
+    #: The per-job capability token, echoed back untouched in the outcome file.
+    token: str = Field(min_length=1)
+    #: Leaf image paths, or one PDF, relative to ``STORAGE_PATH``.
+    inputs: list[str] = Field(min_length=1)
+    #: Job-scoped, relative to ``STORAGE_PATH``: ``<item>/_studio/jobs/<job>/``. The orchestrator promotes it.
+    output_dir: str = Field(min_length=1)
+    #: Where the outcome file goes, relative to ``STORAGE_PATH``.
+    outcome: str = Field(min_length=1)
+
+    def input_paths(self, settings: RuntimeSettings) -> list[Path]:
+        """The inputs as absolute paths, each checked to stay under ``STORAGE_PATH`` (a message is input)."""
+        return [settings.storage_file(relative) for relative in self.inputs]
+
+    def prepare_output(self, settings: RuntimeSettings) -> Path:
+        """The job-scoped output directory, created and checked to stay under ``STORAGE_PATH``."""
+        directory = settings.storage_file(self.output_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def output_file(self, settings: RuntimeSettings, name: str) -> Path:
+        """A file in the output directory (``page-0001.hocr``, ``pages/0001.png``); refuses one that escapes it.
+
+        Its parent directories are created, so the path can be written at once (``outcome.atomic_write``).
+        """
+        directory = settings.storage_file(self.output_dir)
+        path = settings.storage_file(f"{self.output_dir.rstrip('/')}/{name}")
+        if not path.is_relative_to(directory) or path == directory:
+            raise ValueError(f"path escapes the job's output directory: {name!r}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 # -- Catalog payloads (facts) -------------------------------------------------------------------------------------

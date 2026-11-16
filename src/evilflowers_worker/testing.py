@@ -235,9 +235,17 @@ class WorkerProcess:
         print(self.output)
 
     def send(self, task: str, queue: str | None = None, **kwargs: Any) -> str:
+        return self.send_task(task, kwargs, queue=queue)
+
+    def send_task(self, task: str, kwargs: dict[str, Any], *, queue: str | None = None, **options: Any) -> str:
+        """``send`` with Celery's send options (``link``, ``link_error`` …), as an orchestrator sends a job."""
+        return str(self.producer().send_task(task, kwargs=kwargs, queue=queue or self.queue, **options).id)
+
+    def producer(self) -> Any:
+        """A bare Celery app on the same broker (no result backend), to build signatures and send."""
         from celery import Celery
 
-        return str(Celery(broker=self.redis_url).send_task(task, kwargs=kwargs, queue=queue or self.queue).id)
+        return Celery(broker=self.redis_url)
 
     def wait_ready(self, timeout: float = 60) -> None:
         """Until the worker consumes its queue (kombu binds it on start)."""
@@ -268,9 +276,29 @@ class WorkerProcess:
         _args, kwargs, _embed = json.loads(base64.b64decode(message["body"]))
         return dict(kwargs)
 
+    @staticmethod
+    def args(message: dict[str, Any]) -> list[Any]:
+        """The positional arguments of a queued Celery message (protocol 2): a callback's result or task id."""
+        import base64
+        import json
+
+        args, _kwargs, _embed = json.loads(base64.b64decode(message["body"]))
+        return list(args)
+
     def unacked(self) -> int:
         """Messages a worker holds unacknowledged (kombu's Redis transport keeps them in this hash)."""
         return int(self.redis.hlen("unacked"))
+
+    def unacked_ids(self) -> set[str]:
+        """Task ids of the messages held unacknowledged on the db. Unlike ``unacked()``, unaffected by other workers'
+        leftovers in the shared hash."""
+        import json
+
+        ids = set()
+        for raw in self.redis.hvals("unacked"):
+            with contextlib.suppress(ValueError, KeyError, IndexError, TypeError):
+                ids.add(str(json.loads(raw)[0]["headers"]["id"]))
+        return ids
 
 
 class StubCatalogServer:
