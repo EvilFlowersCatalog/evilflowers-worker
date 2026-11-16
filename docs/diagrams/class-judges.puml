@@ -1,0 +1,99 @@
+@startuml class-judges
+!include elvira.iuml
+' What: one Panel per job asks narrow questions through process-lived clients; every answer is a Verdict with a band, or None (passed through unjudged).
+' Kind: UML class diagram, specification level. Scope: evilflowers_worker.judges; the services that call it are left out.
+' Source: issue evilflowers-worker#6; evilflowers-knowledge Cookbooks/Deploy-Decision-Models, Cookbooks/Shared-Inference (2026-11-16)
+
+title judges extra: questions, clients, panel (evilflowers-worker#6, 2026-11-16)
+
+package "evilflowers_worker.judges" {
+  class Panel <<focus>> {
+    budget : Budget
+    ask(judge, question, state, images) : Verdict | None
+  }
+  class Judges {
+    decider : DeciderClient | None
+    decider_vision : DeciderClient | None
+    ollama : OllamaClient | None
+    rerank : RerankClient | None
+    from_settings(settings) : Judges
+    panel() : Panel
+  }
+  class Budget {
+    calls : int
+    seconds : float
+    allows() : bool
+    spend(seconds)
+  }
+  class CircuitBreaker {
+    failures : int
+    reset : float
+    allow() : bool
+    success()
+    failure()
+  }
+  interface Judge {
+    name : str
+    timeout : float
+    breaker : CircuitBreaker
+    ask(question, state, images, timeout) : Verdict
+  }
+  class DeciderClient {
+    POST /v1/systemone
+    vision : bool
+  }
+  class OllamaClient {
+    POST /api/chat
+  }
+  class RerankClient {
+    POST /rerank
+  }
+  class Choice {
+    id : str
+    instructions : str
+    criteria : dict[str, str]
+    reject : frozenset[str]
+  }
+  class Binary {
+    id : str
+    instructions : str
+    reject : frozenset[str]
+  }
+  class Verdict {
+    question : str
+    verdict : str
+    p : float
+    reason : str | None
+    model : str
+    revision : str | None
+    band : keep | review | hide | None
+  }
+  class Thresholds {
+    keep : float
+    hide : float
+    band(question, verdict) : Band
+  }
+  class JudgeSettings {
+    judges_enabled, *_url, *_timeout
+    judge_thresholds : dict[str, Thresholds]
+    judge_budget_calls, judge_budget_seconds
+  }
+}
+
+Judges *-- "0..4" Judge : process-lived clients
+Judges ..> JudgeSettings : <<reads>>
+Judges ..> Panel : <<creates>> one per job
+Panel *-- Budget : per job
+Panel ..> Judge : ask
+Panel ..> Thresholds : band from settings
+Judge *-- CircuitBreaker : per client
+Judge <|.. DeciderClient
+Judge <|.. OllamaClient
+Judge <|.. RerankClient
+Judge ..> Choice : asks
+Judge ..> Binary : asks
+Judge ..> Verdict : answers
+
+caption A Panel never raises for a model's failure: unreachable, open breaker, spent budget, refusal or an unparseable answer\nall return None and count <service>_judge_total{question,outcome,band}. Thresholds come from settings (knowledge#65).
+footer ELVIRA · FIIT STU · evilflowers-worker · docs/diagrams/class-judges.puml
+@enduml

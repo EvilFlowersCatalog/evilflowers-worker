@@ -20,15 +20,17 @@ evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-
 
 Extras:
 - `otel`: the OpenTelemetry SDK and instrumentations;
-- `profiling`: the Pyroscope SDK.
+- `profiling`: the Pyroscope SDK;
+- `judges`: the judges library (`evilflowers_worker.judges`). It adds no package: it is HTTP only, on the core's
+  `requests`.
 
-The image installs both. Without them, everything is a no-op.
+The image installs `otel` and `profiling`. Without them, telemetry and profiling are a no-op.
 
 ## Modules
 
 | Module | What it gives a service |
 |---|---|
-| `contract` | `ExtractRequest`, `ParagraphsJob`, `RegionsJob` (commands); `Region`, `Paragraph`, `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
+| `contract` | `ExtractRequest`, `ParagraphsJob`, `RegionsJob` (commands); `Region` (with the optional decision fields `band`, `p`, `score`, `decision`, `decider_model`, …), `Paragraph`, `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
 | `catalog` | `CatalogClient`: `run()`, `start()`, `regions()`, `paragraphs()`, `job()`; `?attempt=`; `RunNotRunning` / `RunSuperseded` / `DuplicateResults` / `CatalogRefused` (a refusal with the catalog's body) |
 | `jobs` | `LeafJob`: delivery cap, check, `extract`, `publish`, terminal report, `recheck()` for long jobs |
 | `outcome` | `OutcomeFile`, `atomic_write`, `write_outcome`: a catalog job's outcome file, last and atomic |
@@ -37,6 +39,7 @@ The image installs both. Without them, everything is a no-op.
 | `shutdown` | SIGTERM: warm shutdown, grace timer, cold cancel, fallback requeue |
 | `observability` | `configure`, `bind`, `span`, `annotate`, `fail`, `untraced_http`, `metrics.Instrument`, JSON logs, Pyroscope; `CATALOG_JOB_ATTRIBUTES` |
 | `settings` | `RuntimeSettings`: broker, storage (`storage_file`), shutdown, delivery cap, logs; `WorkerSettings`: plus the catalog ingestion API |
+| `judges` | `Judges.from_settings()`, `Panel.ask()`: narrow checks by `decider`, `decider-vision`, Ollama and tei-rerank (`Choice` / `Binary` → `Verdict` with a band); budget per job, circuit breaker per client, never fails the job; `JudgeSettings` mixin (docs/architecture.md §5.1) |
 | `testing` | `FakeCatalog`, `RefusingCatalog`, `RecordingPublisher`, `running()`; `StubCatalogServer`, `assert_outcome`, `WorkerProcess` (a real worker against Redis) |
 
 ## A leaf service in five files

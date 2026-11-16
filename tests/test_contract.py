@@ -8,15 +8,41 @@ from evilflowers_worker.contract import (
     LayoutRegion,
     Paragraph,
     ParagraphsJob,
+    Region,
     RegionsJob,
     RunState,
     StartRun,
     batch_job,
+    dump,
     job_kind,
 )
 
 COMMON = {"run_id": "run-1", "source": "a.pdf", "output_dir": "out"}
 BOX = {"x0": 0.1, "y0": 0.2, "x1": 0.3, "y1": 0.4}
+
+
+def test_a_region_without_a_decision_sends_no_decision_field():
+    region = Region(kind="figure", page=1, seq=0, bbox=BOX)
+    assert set(dump(region)) == {"kind", "page", "seq", "bbox", "provenance"}
+
+
+def test_a_regions_decision_fields_reach_the_payload_and_zero_survives():
+    region = Region(
+        kind="table", page=2, seq=1, bbox=BOX, band="review", p=0.0, score=0.42, decision="table",
+        decider_model="strands-decider-2B-qwen3.5-v1-2610@216d1ccb", review_outcome="rewritten",
+        grounded_share=1.0, signals={"rows": 4},
+    )  # fmt: skip
+    payload = dump(region)
+    assert payload["p"] == 0.0 and payload["band"] == "review" and payload["signals"] == {"rows": 4}
+    assert payload["review_outcome"] == "rewritten" and payload["grounded_share"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "bad", [{"band": "maybe"}, {"p": 1.5}, {"score": -0.1}, {"grounded_share": 2}, {"decision": "x" * 101}]
+)
+def test_a_regions_decision_fields_follow_the_catalogs_limits(bad):
+    with pytest.raises(ValidationError):
+        Region(kind="figure", page=1, seq=0, bbox=BOX, **bad)
 
 
 def test_batch_job_names_follow_the_catalogs_rules():

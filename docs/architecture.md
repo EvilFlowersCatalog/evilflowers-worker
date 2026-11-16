@@ -225,6 +225,8 @@ knowledge `Cookbooks/Deploy-a-Service` §3.
     `failed`).
   - `<service>_catalog_retries_total{route,reason}`
   - `<service>_deliveries_capped_total`
+  - with the `judges` extra (§5.1): `<service>_judge_total{question,outcome,band}` and
+    `<service>_judge_seconds{question,outcome}`
 - **Logs:** one JSON object per line on stdout, carrying `time`, `level`, `logger`, `message`, `trace_id`, `span_id`,
   `task_name`, `task_id`, the bound fields and `exception`.
 - **Profiles:** the Pyroscope SDK when `PYROSCOPE_SERVER_ADDRESS` is set, with `gil_only=False`, and spans linked to
@@ -247,7 +249,9 @@ src/evilflowers_worker/
 │                      telemetry, shutdown; Publisher
 ├── shutdown.py        SIGTERM: warm shutdown, grace timer, cold cancel, fallback requeue
 ├── testing.py         FakeCatalog, RecordingPublisher, StubCatalogServer, assert_outcome, WorkerProcess
-└── observability/     otel setup, spans, metrics (Instrument), JSON logs, bind(), Pyroscope, Celery signals
+├── observability/     otel setup, spans, metrics (Instrument), JSON logs, bind(), Pyroscope, Celery signals
+└── judges/            the `judges` extra (§5.1): questions, verdicts, bands; HTTP clients of decider,
+                       decider-vision, Ollama and tei-rerank; per-job Panel with budget and circuit breakers
 ```
 
 It has no docling, torch or model dependency. A service pins it to a commit:
@@ -258,6 +262,58 @@ evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-
 ```
 
 A fix here reaches a service when it bumps `rev` (and runs `uv lock`); nothing changes under a service that does not.
+
+### 5.1 Judges (the `judges` extra)
+
+Extractors *propose* (regions, OCR lines, captions, formulas). A **judge** answers one narrow question about an
+uncertain proposal: is it real, is it an error, is it associated. The answer is stored as provenance. A judge never
+edits, and it never fails the job. The checks run inside the extractor that made the proposal, so the catalog tasks
+and the standalone tasks ask the same questions (evilflowers-books-digitalizer `docs/design/target-architecture.md` §6,
+evilflowers-worker#6).
+
+![Classes](diagrams/class-judges.svg)
+
+- **HTTP only.** The kit gains no model or imaging dependency, and the caller passes images already encoded. The extra
+  adds no package (it runs on the core's `requests`); a service lists it to declare that it asks judges.
+- **Clients** (`DeciderClient`, `OllamaClient`, `RerankClient`) live as long as the process, each with its own circuit
+  breaker. `decider` (Laya) takes text only, so the client refuses images before sending; it always sends
+  `"model": "multilingual"`. `decider-vision` takes at most 4 images.
+- **Questions:**
+  - `Choice` (a category, with its probability);
+  - `Binary` (yes/no; sent to the decider services as `noul`).
+
+  `reject` names the answers that mean "drop it".
+- **`Verdict{question, verdict, p, reason, model, revision, band}`**: `verdict.provenance()` goes into the region's or
+  the line's `provenance`; `model_ref` (`model@revision`) is what the catalog stores as `decider_model`.
+- **Bands** come from `JUDGE_THRESHOLDS` (per question id, measured in knowledge#65):
+  - a rejecting answer with `p ≥ hide` → `hide`;
+  - a keeping answer with `p ≥ keep` → `keep`;
+  - anything else → `review` (`disputed` in the digitalizer).
+
+  A question without thresholds gets no band. Ollama's `p` is a self-report and tei-rerank's a relevance score:
+  neither is calibrated, so band them only with thresholds measured for them.
+- **One `Panel` per job** (`Judges.panel()`) holds the job's budget: `JUDGE_BUDGET_CALLS` and `JUDGE_BUDGET_SECONDS`, so
+  a book never monopolises app01. A call never waits longer than the seconds left.
+- **Pass-through.** `Panel.ask()` returns `None` instead of raising for each of these outcomes, and counts it in
+  `<service>_judge_total{outcome}`:
+
+  | Outcome | Cause | Breaker |
+  |---|---|---|
+  | `disabled` | judges off, or no URL for that model | — |
+  | `budget` | the job's budget is spent | — |
+  | `open` | the client's breaker is open | — |
+  | `unreachable` | timeout, connection error, 429 or 5xx | counts a failure |
+  | `refused` | any other non-2xx | closes it |
+  | `invalid` | the answer could not be parsed | closes it |
+
+  A caller's bug (images sent to `decider`) still raises `ValueError`.
+
+![One question](diagrams/sequence-judges-ask.svg)
+
+Settings: the `JudgeSettings` mixin, `class Settings(WorkerSettings, JudgeSettings)`. It reads the variables the cluster
+already sets for the image and text-tables workers (`DECIDER_ENABLED`, `DECIDER_VISION_URL`, `DECIDER_TIMEOUT`), plus
+`DECIDER_URL`, `OLLAMA_URL`, `RERANK_URL` / `RERANK_API_KEY`, the `*_REVISION`s, `JUDGE_THRESHOLDS`, `JUDGE_BUDGET_*`
+and `JUDGE_BREAKER_*`.
 
 ### A new service, step by step
 
@@ -306,6 +362,10 @@ A fix here reaches a service when it bumps `rev` (and runs `uv lock`); nothing c
 | Catalog jobs on the kit: outcome files, `RuntimeSettings`, `run_task`, attributes, Python 3.14 | evilflowers-worker#3 |
 | The `files.ocr` outcome-file contract (catalog side, worker side) | EvilFlowersCatalog#169, ocr-service#5 |
 | ocr-service and lcpencrypt-worker adopt the kit | ocr-service#6, lcpencrypt-worker#8 |
+| `judges` extra: shared clients and question schemas (§5.1) | evilflowers-worker#6 |
+| Thresholds and latency of decider / decider-vision | knowledge#65 |
+| image-service's decider call on the extra | image-service#6 |
+| `Region` decision fields (`band`, `p`, `score`, `decision`, `decider_model`, `review_outcome`, `grounded_share`, `signals`) | evilflowers-worker#7, EvilFlowersCatalog#189 |
 
 ## 7. Open questions
 

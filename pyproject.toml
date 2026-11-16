@@ -26,6 +26,9 @@ otel = [
     "opentelemetry-instrumentation-requests==0.66b2",
     "opentelemetry-instrumentation-system-metrics==0.66b2",
 ]
+# Judges (`evilflowers_worker.judges`): HTTP clients of decider, decider-vision, Ollama and tei-rerank. HTTP only, on
+# the core's `requests`: the extra adds no package and exists so a service declares that it asks judges.
+judges = []
 # Pyroscope SDK: Python frames the node's eBPF profiler cannot unwind; on only with PYROSCOPE_SERVER_ADDRESS.
 profiling = [
     "pyroscope-io==1.4.0",

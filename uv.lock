@@ -483,7 +483,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5" },
     { name = "requests", specifier = ">=2.32" },
 ]
-provides-extras = ["otel", "profiling"]
+provides-extras = ["otel", "judges", "profiling"]
 
 [package.metadata.requires-dev]
 dev = [

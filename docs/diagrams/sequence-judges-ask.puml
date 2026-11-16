@@ -1,0 +1,48 @@
+@startuml sequence-judges-ask
+!include elvira.iuml
+' What: an extractor's question either comes back as a banded Verdict or passes through unjudged and counted; the job never fails because of a judge.
+' Kind: UML sequence diagram, one Panel.ask call. Scope: inside one worker process; the catalog call that stores the region is left out.
+' Source: issue evilflowers-worker#6; evilflowers-knowledge Cookbooks/Deploy-Decision-Models (2026-11-16)
+
+title One judged proposal: Panel.ask (evilflowers-worker#6, 2026-11-16)
+
+participant "extractor job\n(e.g. image figures)" as job
+participant "Panel\n(per job)" as panel <<focus>>
+participant "Budget" as budget
+participant "CircuitBreaker\n(per client)" as breaker
+participant "DeciderClient\n(decider-vision)" as client
+participant "decider-vision\n(shared, app01)" as model <<proposed>>
+
+job -> panel : ask(decider_vision, FIGURE_KIND, state, [crop])
+alt no client (judges off, no URL)
+  panel --> job : None (outcome=disabled)
+else budget spent
+  panel -> budget : allows()?
+  panel --> job : None (outcome=budget)
+else breaker open
+  panel -> breaker : allow()?
+  panel --> job : None (outcome=open)
+else call
+  panel -> client : ask(question, state, images, timeout=min(timeout, budget left))
+  client -[$accent_msg()]> model : <b>POST /v1/systemone</b>\nstate, images (base64), questions
+  alt 200 with an answer
+    model --> client : answers.kind {choice, probabilities}, model
+    client --> panel : Verdict(verdict, p, model, revision)
+    panel -> breaker : success()
+    panel -> panel : band from judge_thresholds[question]
+    panel --> job : Verdict(band=keep | review | hide | None)
+  else timeout, connection error, 5xx, 429
+    client --> panel : JudgeUnavailable
+    panel -> breaker : failure()
+    panel --> job : None (outcome=unreachable)
+  else 4xx / unparseable answer
+    client --> panel : JudgeRefused / JudgeInvalid
+    panel -> breaker : success() (the service is up)
+    panel --> job : None (outcome=refused | invalid)
+  end
+  panel -> budget : spend(elapsed)
+end
+
+caption Every path counts <service>_judge_total{question,outcome,band}; a call also records <service>_judge_seconds.\nA None means "post the region without a band, as today".
+footer ELVIRA · FIIT STU · evilflowers-worker · docs/diagrams/sequence-judges-ask.puml
+@enduml

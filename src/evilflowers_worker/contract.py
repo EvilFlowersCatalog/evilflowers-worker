@@ -147,7 +147,12 @@ class RegionsJob(JobMessage):
 
 
 class Region(BaseModel):
-    """A region a service stores (``RegionsForm``)."""
+    """A region a service stores (``RegionsForm``).
+
+    The decision fields (EvilFlowersCatalog#189, evilflowers-worker#7) are optional; ``dump`` leaves out the ones that
+    are ``None``, and the catalog stores such a region with no band, as before. ``Verdict.region_fields()`` (the
+    ``judges`` extra) fills ``band``, ``p``, ``decision`` and ``decider_model``.
+    """
 
     kind: Literal["figure", "table", "equation"]
     page: int = Field(ge=1)
@@ -161,6 +166,23 @@ class Region(BaseModel):
     markdown: str | None = None
     latex: str | None = None
     provenance: dict[str, Any] = Field(default_factory=dict)
+    # -- Decision (EvilFlowersCatalog#189) ----------------------------------------------------------------------------
+    #: ``hide`` is kept in the run and hidden from readers.
+    band: Literal["keep", "review", "hide"] | None = None
+    #: Probability of ``decision``; ``0.0`` is a value, not "unknown".
+    p: float | None = Field(None, ge=0.0, le=1.0)
+    #: A deterministic quality score (a table's grounded share combined with its other signals).
+    score: float | None = Field(None, ge=0.0, le=1.0)
+    #: The answer itself (``stamp``, ``chart``, ``repeated``). ``repeated`` with no ``p`` should come with ``band``.
+    decision: str | None = Field(None, max_length=100)
+    #: ``model@revision`` of the decider; collected in the run's provenance too.
+    decider_model: str | None = Field(None, max_length=200)
+    #: What a review did to the region (a table review: ``kept``, ``rewritten``, ``transcribed``, ``failed``).
+    review_outcome: str | None = Field(None, max_length=50)
+    #: Share of the region's values found in the PDF's own text inside its box.
+    grounded_share: float | None = Field(None, ge=0.0, le=1.0)
+    #: The cheap signals behind the decision (sizes, ratios, hashes); free-form.
+    signals: dict[str, Any] | None = None
 
 
 class Sentence(BaseModel):
