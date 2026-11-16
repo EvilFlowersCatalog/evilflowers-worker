@@ -92,7 +92,11 @@ class Verdict(BaseModel):
 
         ``band`` stays ``None`` without thresholds; the catalog bands ``p`` + ``decision`` itself once it has them.
         """
-        return {"band": self.band, "p": self.p, "decision": self.verdict, "decider_model": self.model_ref}
+        return {"band": self.band} | self.paragraph_fields()
+
+    def paragraph_fields(self) -> dict[str, Any]:
+        """The decision fields of ``contract.Paragraph`` (no ``band`` there): ``paragraph.model_copy(update=...)``."""
+        return {"p": self.p, "decision": self.verdict, "decider_model": self.model_ref}
 
     def provenance(self) -> dict[str, Any]:
         """The verdict as one provenance entry, keyed by the question: ``region.provenance.update(v.provenance())``."""

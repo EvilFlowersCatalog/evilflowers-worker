@@ -2,14 +2,15 @@
 !include elvira.iuml
 ' What: one Panel per job asks narrow questions through process-lived clients; every answer is a Verdict with a band, or None (passed through unjudged).
 ' Kind: UML class diagram, specification level. Scope: evilflowers_worker.judges; the services that call it are left out.
-' Source: issue evilflowers-worker#6; evilflowers-knowledge Cookbooks/Deploy-Decision-Models, Cookbooks/Shared-Inference (2026-11-16)
+' Source: issues evilflowers-worker#6, #10; evilflowers-knowledge Cookbooks/Deploy-Decision-Models, Cookbooks/Shared-Inference (2026-11-16)
 
-title judges extra: questions, clients, panel (evilflowers-worker#6, 2026-11-16)
+title judges extra: questions, clients, panel (evilflowers-worker#6, #10, 2026-11-16)
 
 package "evilflowers_worker.judges" {
   class Panel <<focus>> {
     budget : Budget
     ask(judge, question, state, images) : Verdict | None
+    ask_batch(judge, question, states) : list[Verdict | None]
   }
   class Judges {
     decider : DeciderClient | None
@@ -36,10 +37,13 @@ package "evilflowers_worker.judges" {
     name : str
     timeout : float
     breaker : CircuitBreaker
+    batches : bool
     ask(question, state, images, timeout) : Verdict
+    ask_batch(question, states, timeout) : list[Verdict | JudgeInvalid]
   }
   class DeciderClient {
     POST /v1/systemone
+    POST /v1/systemone/batch (decider only, <= 64 states)
     vision : bool
   }
   class OllamaClient {
@@ -67,6 +71,8 @@ package "evilflowers_worker.judges" {
     model : str
     revision : str | None
     band : keep | review | hide | None
+    region_fields() : dict
+    paragraph_fields() : dict
   }
   class Thresholds {
     keep : float
@@ -84,7 +90,7 @@ Judges *-- "0..4" Judge : process-lived clients
 Judges ..> JudgeSettings : <<reads>>
 Judges ..> Panel : <<creates>> one per job
 Panel *-- Budget : per job
-Panel ..> Judge : ask
+Panel ..> Judge : ask, ask_batch (64 states per request)
 Panel ..> Thresholds : band from settings
 Judge *-- CircuitBreaker : per client
 Judge <|.. DeciderClient

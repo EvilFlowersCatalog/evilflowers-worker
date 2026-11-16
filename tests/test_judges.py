@@ -6,7 +6,7 @@ import pytest
 import requests
 from pydantic import ValidationError
 
-from evilflowers_worker.contract import Region
+from evilflowers_worker.contract import Paragraph, Region
 from evilflowers_worker.judges import (
     Binary,
     Budget,
@@ -357,6 +357,166 @@ def test_ollama_answering_a_non_string_verdict_is_invalid(counted):
     client = OllamaClient("ollama", "http://ollama", model="elvira-assistant", timeout=120, http=http)  # type: ignore[arg-type]
     assert Panel(Budget(10, 60)).ask(client, IS_FIGURE) is None
     assert counted[0]["outcome"] == "invalid"
+
+
+# -- Batches: one question about many states (decider) ----------------------------------------------------------------
+
+
+def noul_result(yes: float | None = 0.9, *, model: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {"answers": {"is_figure": {"noul": yes}}}
+    return result | {"model": model} if model else result
+
+
+def batch_answer(*results: dict[str, Any], model: str = "laya-multilingual") -> requests.Response:
+    return response(body={"results": list(results), "model": model, "total_usage": {}})
+
+
+def text_decider(*answers: requests.Response | Exception, **kwargs: Any) -> DeciderClient:
+    return decider(*answers, vision=False, model="multilingual", **kwargs)
+
+
+@pytest.fixture
+def seconds(monkeypatch):
+    """Every `<service>_judge_seconds` record, as (attributes)."""
+    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(panel.JUDGE_SECONDS, "record", lambda value, attributes=None: seen.append(attributes or {}))
+    return seen
+
+
+def test_the_text_decider_asks_a_batch_and_keeps_the_order():
+    client = text_decider(batch_answer(noul_result(0.9), noul_result(0.1, model="laya@x"), noul_result(0.7)),
+                          revision="80a1")  # fmt: skip
+    answers = client.ask_batch(IS_FIGURE, ["a", {"body": "b"}, "c"], timeout=7.0)
+
+    call = client.http.calls[0]  # type: ignore[attr-defined]
+    assert call["url"] == "http://decider-vision.shared.svc.cluster.local/v1/systemone/batch"
+    assert call["timeout"] == 7.0
+    questions = {"is_figure": {"type": "noul", "instructions": IS_FIGURE.instructions}}
+    assert call["json"] == {"states": ["a", {"body": "b"}, "c"], "model": "multilingual", "questions": questions}
+    assert [(a.verdict, a.p, a.model) for a in answers] == [  # type: ignore[union-attr]
+        ("yes", 0.9, "laya-multilingual"), ("no", pytest.approx(0.9), "laya@x"), ("yes", 0.7, "laya-multilingual")
+    ]  # fmt: skip
+    assert answers[0].revision == "80a1"  # type: ignore[union-attr]
+
+
+def test_decider_vision_does_not_batch():
+    client = decider()
+    with pytest.raises(ValueError, match="one state per request"):
+        client.ask_batch(IS_FIGURE, ["a"])
+    with pytest.raises(ValueError, match="one state per request"):
+        Panel(Budget(10, 60)).ask_batch(client, IS_FIGURE, ["a"])
+    assert client.http.calls == []  # type: ignore[attr-defined]
+    assert client.breaker.state == "closed"
+
+
+def test_a_client_takes_at_most_64_states():
+    with pytest.raises(ValueError, match="64"):
+        text_decider().ask_batch(IS_FIGURE, ["a"] * 65)
+
+
+def test_an_empty_batch_sends_nothing():
+    client = text_decider()
+    assert Panel(Budget(10, 60)).ask_batch(client, IS_FIGURE, []) == []
+    assert client.http.calls == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"model": "laya"}, {"results": "nope"}, {"results": [noul_result()]}],  # no results, not a list, 1 of 2 states
+)
+def test_a_batch_answer_without_one_result_per_state_is_invalid_as_a_whole(body):
+    with pytest.raises(JudgeInvalid):
+        text_decider(response(body=body)).ask_batch(IS_FIGURE, ["a", "b"])
+
+
+def test_the_panel_bands_each_state_and_keeps_the_order(counted, seconds):
+    client = text_decider(batch_answer(noul_result(0.95), noul_result(0.02), noul_result(0.6)))
+    p = Panel(Budget(10, 60), {"is_figure": Thresholds(keep=0.9, hide=0.9)})
+    verdicts = p.ask_batch(client, IS_FIGURE, ["a", "b", "c"])
+    assert [(v.verdict, v.band) for v in verdicts] == [("yes", "keep"), ("no", "hide"), ("yes", "review")]  # type: ignore[union-attr]
+    assert [c["band"] for c in counted] == ["keep", "hide", "review"]
+    assert seconds == [{"question": "is_figure", "outcome": "judged", "batch": "true"}]
+    assert p.budget.used_calls == 1
+
+
+def test_an_answer_outside_the_criteria_is_invalid_for_its_state_only(counted):
+    bad_kind = {"answers": {"figure_kind": {"choice": "selfie", "probabilities": {"selfie": 0.9}}}}
+    good = {"answers": {"figure_kind": {"choice": "chart", "probabilities": {"chart": 0.8}}}}
+    client = text_decider(batch_answer(good, bad_kind, {"answers": {}}, good))
+    verdicts = Panel(Budget(10, 60)).ask_batch(client, FIGURE_KIND, ["a", "b", "c", "d"])
+    assert [v and v.verdict for v in verdicts] == ["chart", None, None, "chart"]
+    assert [c["outcome"] for c in counted] == ["judged", "invalid", "invalid", "judged"]
+    assert client.breaker.state == "closed"
+
+
+def test_more_than_64_states_go_in_requests_of_64_in_order(seconds):
+    sizes = [64, 64, 2]
+    client = text_decider(*[batch_answer(*[noul_result(0.9 if i % 2 else 0.1) for i in range(n)]) for n in sizes])
+    verdicts = Panel(Budget(10, 0)).ask_batch(client, IS_FIGURE, [str(i) for i in range(130)])
+    assert [len(c["json"]["states"]) for c in client.http.calls] == sizes  # type: ignore[attr-defined]
+    assert client.http.calls[2]["json"]["states"] == ["128", "129"]  # type: ignore[attr-defined]
+    assert len(verdicts) == 130 and all(v is not None for v in verdicts)
+    assert len(seconds) == 3
+
+
+def test_a_spent_budget_skips_the_rest_of_the_list(counted):
+    client = text_decider(batch_answer(*[noul_result()] * 64), batch_answer(*[noul_result()] * 64))
+    p = Panel(Budget(calls=2, seconds=0))
+    verdicts = p.ask_batch(client, IS_FIGURE, ["s"] * 150)
+    assert len(client.http.calls) == 2  # type: ignore[attr-defined]
+    assert verdicts[:128] == [verdicts[0]] * 128 and verdicts[0] is not None
+    assert verdicts[128:] == [None] * 22
+    assert [c["outcome"] for c in counted[128:]] == ["budget"] * 22
+
+
+def test_a_batch_waits_no_longer_than_the_seconds_left_in_the_budget():
+    client = text_decider(batch_answer(noul_result()))
+    Panel(Budget(calls=0, seconds=60, used_seconds=58)).ask_batch(client, IS_FIGURE, ["a"])
+    assert client.http.calls[0]["timeout"] == pytest.approx(2.0)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [(requests.ReadTimeout("slow"), "unreachable"), (response(422, {}), "refused"), (response(200, {}), "invalid")],
+)
+def test_a_failed_request_fails_each_of_its_states(counted, seconds, answer, outcome):
+    verdicts = Panel(Budget(10, 60)).ask_batch(text_decider(answer), IS_FIGURE, ["a", "b", "c"])
+    assert verdicts == [None, None, None]
+    assert counted == [{"question": "is_figure", "outcome": outcome, "band": "none"}] * 3
+    assert seconds == [{"question": "is_figure", "outcome": outcome, "batch": "true"}]
+
+
+def test_a_failed_batch_trips_the_breaker_once_and_the_rest_is_skipped(counted):
+    client = text_decider(requests.ConnectionError("down"), requests.ConnectionError("down"))
+    client.breaker = CircuitBreaker(failures=2, reset=60)
+    verdicts = Panel(Budget(10, 60)).ask_batch(client, IS_FIGURE, ["s"] * 200)  # 4 requests' worth
+
+    assert verdicts == [None] * 200
+    assert len(client.http.calls) == 2  # type: ignore[attr-defined]
+    assert client.breaker.state == "open"
+    outcomes = [c["outcome"] for c in counted]
+    assert outcomes == ["unreachable"] * 128 + ["open"] * 72
+
+
+def test_one_failed_batch_counts_one_breaker_failure():
+    client = text_decider(requests.ConnectionError("down"), batch_answer(*[noul_result()] * 64))
+    client.breaker = CircuitBreaker(failures=2, reset=60)
+    Panel(Budget(10, 60)).ask_batch(client, IS_FIGURE, ["s"] * 64)
+    assert client.breaker.state == "closed"  # 64 states failed, but the breaker saw one failure
+    Panel(Budget(10, 60)).ask_batch(client, IS_FIGURE, ["s"] * 64)
+    assert client.breaker.state == "closed" and client.breaker._count == 0
+
+
+def test_no_client_disables_each_state(counted):
+    assert Panel(Budget(10, 60)).ask_batch(None, IS_FIGURE, ["a", "b"]) == [None, None]
+    assert [c["outcome"] for c in counted] == ["disabled", "disabled"]
+
+
+def test_a_verdict_fills_a_paragraphs_decision_fields():
+    verdict = Verdict(question="paragraph_kind", verdict="caption", p=0.0, model="laya", revision="80a1")
+    paragraph = Paragraph(page=1, seq=0, bbox={"x0": 0, "y0": 0, "x1": 1, "y1": 1}, text="Obr. 3.2")
+    paragraph = Paragraph.model_validate(paragraph.model_dump() | verdict.paragraph_fields())
+    assert (paragraph.decision, paragraph.p, paragraph.decider_model) == ("caption", 0.0, "laya@80a1")
 
 
 # -- Settings and wiring --------------------------------------------------------------------------------------------

@@ -1,0 +1,53 @@
+@startuml sequence-judges-ask-batch
+!include elvira.iuml
+' What: one question about many states goes to decider in requests of at most 64 states; each state comes back as a banded Verdict or None, and a failed request fails only its own states.
+' Kind: UML sequence diagram, one Panel.ask_batch call. Scope: inside one worker process; the catalog call that stores the paragraphs is left out.
+' Source: issue evilflowers-worker#10; evilflowers-knowledge Cookbooks/Deploy-Decision-Models; EvilFlowersCatalog apps/decider/client.py (develop, 2026-11-16)
+
+title Many states, one question: Panel.ask_batch (evilflowers-worker#10, 2026-11-16)
+
+participant "extractor job\n(e.g. text paragraphs)" as job
+participant "Panel\n(per job)" as panel <<focus>>
+participant "Budget" as budget
+participant "CircuitBreaker\n(per client)" as breaker
+participant "DeciderClient\n(decider, text)" as client
+participant "decider\n(Laya, shared, app01)" as model
+
+job -> panel : ask_batch(decider, PARAGRAPH_KIND, states[1..n])
+alt no client (judges off, no URL)
+  panel --> job : [None] * n (outcome=disabled each)
+else
+  loop each chunk of at most 64 states, in order
+    alt budget spent
+      panel -> budget : allows()?
+      note right of panel : this chunk and every later one:\nNone (outcome=budget each)
+    else breaker open
+      panel -> breaker : allow()?
+      note right of panel : None (outcome=open each)
+    else call
+      panel -> client : ask_batch(question, chunk, timeout=min(timeout, budget left))
+      client -[$accent_msg()]> model : <b>POST /v1/systemone/batch</b>\nstates (<= 64), questions, model=multilingual
+      alt 200 with results, one per state
+        model --> client : results[i].answers.<id>, model
+        client --> panel : [Verdict | JudgeInvalid] (same order)
+        panel -> breaker : success()
+        panel -> panel : band each Verdict from judge_thresholds[question]
+        note right of panel : a JudgeInvalid is None\n(outcome=invalid) for that state only
+      else timeout, connection error, 5xx, 429
+        client --> panel : JudgeUnavailable
+        panel -> breaker : failure() (once per request)
+        note right of panel : None (outcome=unreachable each)
+      else 4xx / no results / wrong count
+        client --> panel : JudgeRefused / JudgeInvalid
+        panel -> breaker : success() (the service is up)
+        note right of panel : None (outcome=refused | invalid each)
+      end
+      panel -> budget : spend(elapsed) (one call per request)
+    end
+  end
+  panel --> job : [Verdict(band) | None] (same order as states)
+end
+
+caption <service>_judge_total{question,outcome,band} counts each state;\n<service>_judge_seconds{question,outcome,batch="true"} records each request.
+footer ELVIRA · FIIT STU · evilflowers-worker · docs/diagrams/sequence-judges-ask-batch.puml
+@enduml

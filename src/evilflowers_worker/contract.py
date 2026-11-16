@@ -251,7 +251,11 @@ class Sentence(BaseModel):
 
 
 class Paragraph(BaseModel):
-    """A paragraph with its sentences and embedding (``ParagraphsForm``)."""
+    """A paragraph with its sentences and embedding (``ParagraphsForm``).
+
+    The decision fields (evilflowers-worker#10, knowledge#76) are optional, as on ``Region``; ``dump`` leaves out the
+    ones that are ``None``. ``Verdict.paragraph_fields()`` (the ``judges`` extra) fills them.
+    """
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -262,6 +266,13 @@ class Paragraph(BaseModel):
     text: str
     sentences: list[Sentence] = Field(default_factory=list)
     embedding: list[float] | None = None
+    # -- Decision (knowledge#76) --------------------------------------------------------------------------------------
+    #: The answer itself (the paragraph's kind: ``body``, ``caption``, ``header`` …).
+    decision: str | None = Field(None, max_length=100)
+    #: Probability of ``decision``; ``0.0`` is a value, not "unknown".
+    p: float | None = Field(None, ge=0.0, le=1.0)
+    #: ``model@revision`` of the decider.
+    decider_model: str | None = Field(None, max_length=200)
 
     @field_validator("embedding")
     @classmethod

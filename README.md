@@ -33,7 +33,7 @@ The image installs `otel` and `profiling`. Without them, telemetry and profiling
 
 | Module | What it gives a service |
 |---|---|
-| `contract` | `ExtractRequest` (`steps`: a step re-run), `ParagraphsJob`, `RegionsJob`, `StandaloneJob` (`input_paths()`, `prepare_output()`, `output_file()`) (commands); `Region` (with the optional decision fields `band`, `p`, `score`, `decision`, `decider_model`, …), `Paragraph`, `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
+| `contract` | `ExtractRequest` (`steps`: a step re-run), `ParagraphsJob`, `RegionsJob`, `StandaloneJob` (`input_paths()`, `prepare_output()`, `output_file()`) (commands); `Region` (with the optional decision fields `band`, `p`, `score`, `decision`, `decider_model`, …), `Paragraph` (with the optional `decision`, `p`, `decider_model`), `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
 | `catalog` | `CatalogClient`: `run()`, `start()`, `regions()`, `paragraphs()`, `job()`; `?attempt=`; `RunNotRunning` / `RunSuperseded` / `DuplicateResults` / `CatalogRefused` (a refusal with the catalog's body) |
 | `jobs` | `LeafJob`: delivery cap, check, `extract`, `publish`, terminal report, `recheck()` for long jobs |
 | `outcome` | `OutcomeFile`, `atomic_write`, `write_outcome`: a catalog job's outcome file, last and atomic |
@@ -42,7 +42,7 @@ The image installs `otel` and `profiling`. Without them, telemetry and profiling
 | `shutdown` | SIGTERM: warm shutdown, grace timer, cold cancel, fallback requeue |
 | `observability` | `configure`, `bind`, `span`, `annotate`, `fail`, `untraced_http`, `metrics.Instrument`, JSON logs, Pyroscope; `CATALOG_JOB_ATTRIBUTES` |
 | `settings` | `RuntimeSettings`: broker, storage (`storage_file`), shutdown, delivery cap, logs; `WorkerSettings`: plus the catalog ingestion API |
-| `judges` | `Judges.from_settings()`, `Panel.ask()`: narrow checks by `decider`, `decider-vision`, Ollama and tei-rerank (`Choice` / `Binary` → `Verdict` with a band); budget per job, circuit breaker per client, never fails the job; `JudgeSettings` mixin (docs/architecture.md §5.1) |
+| `judges` | `Judges.from_settings()`, `Panel.ask()`, `Panel.ask_batch()` (one question about many states, `decider` only, 64 per request): narrow checks by `decider`, `decider-vision`, Ollama and tei-rerank (`Choice` / `Binary` → `Verdict` with a band); budget per job, circuit breaker per client, never fails the job; `JudgeSettings` mixin (docs/architecture.md §5.1) |
 | `testing` | `FakeCatalog`, `RefusingCatalog`, `RecordingPublisher`, `running()`; `StubCatalogServer`, `assert_outcome`, `WorkerProcess` (a real worker against Redis) |
 
 ## A leaf service in five files

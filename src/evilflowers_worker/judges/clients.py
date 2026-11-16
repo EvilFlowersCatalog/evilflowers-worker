@@ -2,7 +2,7 @@
 
 | Client | Service | Endpoint | Takes |
 |---|---|---|---|
-| ``DeciderClient(vision=False)`` | ``decider`` (Laya) | ``POST /v1/systemone`` | text only (an image → 422) |
+| ``DeciderClient(vision=False)`` | ``decider`` (Laya) | ``POST /v1/systemone``, ``/batch`` | text (≤ 64 per batch) |
 | ``DeciderClient(vision=True)`` | ``decider-vision`` (Strands) | ``POST /v1/systemone`` | state + at most 4 images |
 | ``OllamaClient`` | Ollama ``elvira-assistant`` | ``POST /api/chat`` | state + images, structured JSON |
 | ``RerankClient`` | ``tei-rerank`` (bge-reranker-v2-m3) | ``POST /rerank`` | a query and candidate texts |
@@ -43,6 +43,8 @@ Image = bytes | str
 
 #: ``decider-vision`` takes at most this many images per request.
 MAX_VISION_IMAGES = 4
+#: ``decider`` takes at most this many states per ``/v1/systemone/batch`` request.
+MAX_BATCH_STATES = 64
 
 
 class JudgeError(Exception):
@@ -116,6 +118,10 @@ def encode_image(image: Image) -> str:
     return base64.b64encode(image).decode("ascii") if isinstance(image, bytes) else image
 
 
+def _state(state: State) -> Any:
+    return state if isinstance(state, str) else dict(state)
+
+
 def _base_url(url: str, path: str) -> str:
     """Accept the service address with or without the endpoint path (env values in the cluster use both)."""
     url = url.rstrip("/")
@@ -127,6 +133,11 @@ class Judge(ABC):
 
     #: The endpoint path, appended to the base URL.
     path: str
+
+    @property
+    def batches(self) -> bool:
+        """Whether ``ask_batch`` asks many states in one request (only ``decider`` does)."""
+        return False
 
     def __init__(
         self,
@@ -152,9 +163,17 @@ class Judge(ABC):
     ) -> Verdict:
         """The model's answer; raises a ``JudgeError`` when there is none."""
 
-    def _post(self, payload: dict[str, Any], timeout: float | None) -> Any:
+    def ask_batch(
+        self, question: Question, states: Sequence[State], *, timeout: float | None = None
+    ) -> list[Verdict | JudgeInvalid]:
+        """One answer per state, in order (a ``JudgeInvalid`` in place of an unreadable one); raises a ``JudgeError``
+        when the request got no answer at all. Only ``decider`` serves a batch endpoint."""
+        raise ValueError(f"{self.name} asks one state per request; only decider serves /v1/systemone/batch")
+
+    def _post(self, payload: dict[str, Any], timeout: float | None, *, path: str | None = None) -> Any:
         try:
-            response = self.http.post(f"{self.url}{self.path}", json=payload, timeout=timeout or self.timeout)
+            url = f"{self.url}{path or self.path}"
+            response = self.http.post(url, json=payload, timeout=timeout or self.timeout)
         except requests.RequestException as error:
             raise JudgeUnavailable(f"{self.name}: {error}") from error
         if response.status_code == 429 or response.status_code >= 500:
@@ -186,12 +205,18 @@ class DeciderClient(Judge):
     """``decider`` (text) or ``decider-vision`` (images): ``POST /v1/systemone`` with keyed questions."""
 
     path = "/v1/systemone"
+    batch_path = "/v1/systemone/batch"
 
     def __init__(self, name: str, url: str, *, vision: bool, model: str | None = None, **kwargs: Any):
         super().__init__(name, url, **kwargs)
         self.vision = vision
         #: Laya's checkpoint (``multilingual``): without it Laya auto-routes and may swap in its English checkpoint.
         self.model = model
+
+    @property
+    def batches(self) -> bool:
+        # Strands' batch endpoint is not part of the decider-vision contract (knowledge#64).
+        return not self.vision
 
     def ask(
         self, question: Question, *, state: State = "", images: Sequence[Image] = (), timeout: float | None = None
@@ -200,19 +225,55 @@ class DeciderClient(Judge):
             raise ValueError(f"{self.name} takes text only; ask an image question of decider-vision")
         if len(images) > MAX_VISION_IMAGES:
             raise ValueError(f"{self.name} takes at most {MAX_VISION_IMAGES} images per request")
+        payload = self._payload(question, state=_state(state))
+        if images:
+            payload["images"] = [encode_image(image) for image in images]
+        body = self._post(payload, timeout)
+        return self._answer(question, body, model=body.get("model") if isinstance(body, dict) else None)
+
+    def ask_batch(
+        self, question: Question, states: Sequence[State], *, timeout: float | None = None
+    ) -> list[Verdict | JudgeInvalid]:
+        """``POST /v1/systemone/batch`` (``decider`` only): one answer per state, in the order of ``states``.
+
+        An answer that cannot be read is a ``JudgeInvalid`` in its place, so one bad state does not cost the other
+        63; a body without one result per state raises ``JudgeInvalid`` for the whole request.
+        """
+        if not self.batches:
+            raise ValueError(f"{self.name} asks one state per request; only decider serves /v1/systemone/batch")
+        if len(states) > MAX_BATCH_STATES:
+            raise ValueError(f"{self.name} takes at most {MAX_BATCH_STATES} states per request, got {len(states)}")
+        if not states:
+            return []
+        payload = self._payload(question, states=[_state(state) for state in states])
+        body = self._post(payload, timeout, path=self.batch_path)
+        results = body.get("results") if isinstance(body, dict) else None
+        if not isinstance(results, list):
+            raise JudgeInvalid(f"{self.name}: the batch answer has no results")
+        if len(results) != len(states):
+            raise JudgeInvalid(f"{self.name}: {len(results)} results for {len(states)} states")
+        answers: list[Verdict | JudgeInvalid] = []
+        for result in results:
+            model = result.get("model") if isinstance(result, dict) else None
+            try:
+                answers.append(self._answer(question, result, model=model or body.get("model")))
+            except JudgeInvalid as error:
+                answers.append(error)
+        return answers
+
+    def _payload(self, question: Question, **states: Any) -> dict[str, Any]:
         spec: dict[str, Any] = {"instructions": question.instructions}
         if isinstance(question, Choice):
             spec |= {"type": "choice", "criteria": dict(question.criteria)}
         else:
             spec["type"] = "noul"
-        payload: dict[str, Any] = {"state": state if isinstance(state, str) else dict(state)}
-        payload["questions"] = {question.id: spec}
+        payload: dict[str, Any] = {**states, "questions": {question.id: spec}}
         if self.model:
             payload["model"] = self.model
-        if images:
-            payload["images"] = [encode_image(image) for image in images]
+        return payload
 
-        body = self._post(payload, timeout)
+    def _answer(self, question: Question, body: Any, *, model: Any) -> Verdict:
+        """The verdict in ``{"answers": {id: ...}}``: the whole single answer, or one result of a batch."""
         try:
             answer = body["answers"][question.id]
         except (KeyError, TypeError) as error:
@@ -220,7 +281,7 @@ class DeciderClient(Judge):
         if not isinstance(answer, dict):
             raise JudgeInvalid(f"{self.name}: the answer to {question.id!r} is not an object")
         verdict, p = self._read(question, answer)
-        return self._verdict(question, verdict, p, model=body.get("model"), reason=answer.get("reason"))
+        return self._verdict(question, verdict, p, model=model, reason=answer.get("reason"))
 
     def _read(self, question: Question, answer: dict[str, Any]) -> tuple[Any, Any]:
         probabilities = answer.get("probabilities")

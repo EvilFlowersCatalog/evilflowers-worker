@@ -365,6 +365,22 @@ evilflowers-worker#6).
 
 ![One question](diagrams/sequence-judges-ask.svg)
 
+- **Batches** (evilflowers-worker#10). `Panel.ask_batch(judges.decider, question, states)` asks one question about
+  many states (every paragraph of a book, every candidate heading) through `POST /v1/systemone/batch`. It sends
+  `MAX_BATCH_STATES` (64) states per request, so a book of ~1 700 paragraphs takes ~27 requests instead of ~1 700.
+  It returns one `Verdict | None` per state, in order.
+  - Each request is one call of the budget and one success or failure of the breaker. Once the budget is spent, the
+    remaining states are counted `budget`.
+  - A request that gets no answer (`unreachable`, `refused`, or a body without one result per state) passes all its
+    states through. An unreadable answer (outside the criteria) is `invalid` for its own state only.
+  - `<service>_judge_total` counts each state; `<service>_judge_seconds` records each request, labelled
+    `batch="true"`.
+  - `decider` only: decider-vision (Strands) has no batch endpoint in the contract, so it raises `ValueError`, as do
+    Ollama and tei-rerank. The judge's `timeout` (`DECIDER_TIMEOUT`) applies to the whole request of 64 states.
+  - `Verdict.paragraph_fields()` fills `contract.Paragraph`'s `decision`, `p` and `decider_model`.
+
+![Many states](diagrams/sequence-judges-ask-batch.svg)
+
 Settings: the `JudgeSettings` mixin, `class Settings(WorkerSettings, JudgeSettings)`. It reads the variables the cluster
 already sets for the image and text-tables workers (`DECIDER_ENABLED`, `DECIDER_VISION_URL`, `DECIDER_TIMEOUT`), plus
 `DECIDER_URL`, `OLLAMA_URL`, `RERANK_URL` / `RERANK_API_KEY`, the `*_REVISION`s, `JUDGE_THRESHOLDS`, `JUDGE_BUDGET_*`
@@ -422,6 +438,7 @@ and `JUDGE_BREAKER_*`.
 | image-service's decider call on the extra | image-service#6 |
 | Standalone jobs: `StandaloneJob`, `standalone_callbacks`, link / link_error without a result backend | evilflowers-worker#5 |
 | `Region` decision fields (`band`, `p`, `score`, `decision`, `decider_model`, `review_outcome`, `grounded_share`, `signals`) | evilflowers-worker#7, EvilFlowersCatalog#189 |
+| Batch questions to `decider` (`Panel.ask_batch`, `/v1/systemone/batch`); `Paragraph` decision fields (`decision`, `p`, `decider_model`) | evilflowers-worker#10, knowledge#76 |
 
 ## 7. Open questions
 

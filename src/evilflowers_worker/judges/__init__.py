@@ -21,6 +21,10 @@ for crop in uncertain:
     verdict = panel.ask(judges.decider_vision, FIGURE_KIND, state="A region cropped from a page.", images=[crop.png])
     if verdict is not None:
         region.provenance.update(verdict.provenance())  # band, p, verdict, model@revision
+
+# one question about many states (decider only): 64 states per request, verdicts in the order of the states
+verdicts = panel.ask_batch(judges.decider, PARAGRAPH_KIND, [paragraph.text for paragraph in paragraphs])
+paragraphs = [p if v is None else p.model_copy(update=v.paragraph_fields()) for p, v in zip(paragraphs, verdicts)]
 ```
 
 HTTP only: the kit gains no model or imaging dependency; the caller passes images already encoded (PNG, JPEG, WebP).
@@ -29,6 +33,7 @@ HTTP only: the kit gains no model or imaging dependency; the caller passes image
 from dataclasses import dataclass
 
 from evilflowers_worker.judges.clients import (
+    MAX_BATCH_STATES,
     CircuitBreaker,
     DeciderClient,
     Judge,
@@ -46,6 +51,7 @@ from evilflowers_worker.judges.settings import JudgeSettings
 __all__ = [
     "JUDGE_CALLS",
     "JUDGE_SECONDS",
+    "MAX_BATCH_STATES",
     "Band",
     "Binary",
     "Budget",

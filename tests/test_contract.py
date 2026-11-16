@@ -115,6 +115,21 @@ def test_a_job_report_truncates_its_error():
     assert JobReport(status="done", error="").error is None
 
 
+def test_a_paragraphs_decision_fields_are_optional_and_zero_survives():
+    plain = Paragraph(page=1, seq=0, bbox=BOX, text="t")
+    assert not {"decision", "p", "decider_model"} & set(dump(plain))
+    judged = Paragraph(page=1, seq=0, bbox=BOX, text="t", decision="caption", p=0.0, decider_model="laya@80a1")
+    assert {k: dump(judged)[k] for k in ("decision", "p", "decider_model")} == {
+        "decision": "caption", "p": 0.0, "decider_model": "laya@80a1"
+    }  # fmt: skip
+
+
+@pytest.mark.parametrize("bad", [{"p": 1.5}, {"p": -0.1}, {"decision": "x" * 101}, {"decider_model": "x" * 201}])
+def test_a_paragraphs_decision_fields_follow_the_catalogs_limits(bad):
+    with pytest.raises(ValidationError):
+        Paragraph(page=1, seq=0, bbox=BOX, text="t", **bad)
+
+
 def test_a_paragraph_embedding_must_have_the_catalogs_dimensions():
     with pytest.raises(ValidationError, match="1024"):
         Paragraph(page=1, seq=0, bbox=BOX, text="t", embedding=[0.0] * 3)
