@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 import requests
+from pydantic import ValidationError
 
 from evilflowers_worker.contract import Region
 from evilflowers_worker.judges import (
@@ -389,11 +390,42 @@ def test_judge_settings_compose_with_the_worker_settings(monkeypatch, tmp_path):
 
 def test_empty_judge_variables_mean_their_defaults(monkeypatch, tmp_path):
     """Switching judges off leaves the env set but empty (Deploy-Decision-Models, Roll back)."""
-    for name in ("DECIDER_ENABLED", "DECIDER_TIMEOUT", "DECIDER_VISION_URL", "JUDGE_BUDGET_CALLS"):
+    for name in ("DECIDER_ENABLED", "DECIDER_TIMEOUT", "DECIDER_VISION_URL", "JUDGE_BUDGET_CALLS", "JUDGE_THRESHOLDS"):
         monkeypatch.setenv(name, "")
     settings = ImageSettings(_env_file=None, storage_path=tmp_path)
     assert not settings.judges_enabled and settings.decider_timeout == 60.0
     assert settings.decider_vision_url is None and settings.judge_budget_calls == 500
+    assert settings.judge_thresholds == {}
+
+
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_blank_thresholds_mean_none(monkeypatch, blank):
+    """evilflowers-worker#8: the env source JSON-decoded the raw value before any validator, and "" stopped startup."""
+    monkeypatch.setenv("JUDGE_THRESHOLDS", blank)
+    assert JudgeSettings(_env_file=None).judge_thresholds == {}
+
+
+def test_blank_thresholds_in_a_dotenv_file_mean_none(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("JUDGE_THRESHOLDS=\nDECIDER_ENABLED=\n")
+    settings = JudgeSettings(_env_file=env_file)
+    assert settings.judge_thresholds == {} and not settings.judges_enabled
+
+
+def test_thresholds_parse_from_json_and_from_code(monkeypatch):
+    monkeypatch.setenv("JUDGE_THRESHOLDS", '{"figure_kind": {"keep": 0.8, "hide": 0.9}}')
+    assert JudgeSettings(_env_file=None).judge_thresholds == {"figure_kind": Thresholds(keep=0.8, hide=0.9)}
+    monkeypatch.delenv("JUDGE_THRESHOLDS")
+    in_code = JudgeSettings(_env_file=None, judge_thresholds={"caption": {"keep": 0.5, "hide": 0.7}})
+    assert in_code.judge_thresholds == {"caption": Thresholds(keep=0.5, hide=0.7)}
+
+
+@pytest.mark.parametrize("bad", ["{not json", '{"figure_kind": {"keep": 2, "hide": 0.9}}'])
+def test_malformed_thresholds_still_stop_the_worker(monkeypatch, bad):
+    """Blank means none; a wrong value is a configuration error, not something to ignore."""
+    monkeypatch.setenv("JUDGE_THRESHOLDS", bad)
+    with pytest.raises(ValidationError):
+        JudgeSettings(_env_file=None)
 
 
 def test_disabled_judges_build_no_client(tmp_path):

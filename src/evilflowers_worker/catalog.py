@@ -89,8 +89,10 @@ def _route(path: str) -> str:
 def _conflict(response: Any) -> Exception:
     """A 409 as the right exception, by the problem detail's ``reason``.
 
-    ``superseded`` → ``RunSuperseded``; ``duplicate`` → ``DuplicateResults``; ``not_running`` or none (a catalog
-    that predates the reasons) → ``RunNotRunning``.
+    ``superseded`` → ``RunSuperseded``; ``duplicate`` → ``DuplicateResults``; anything else → ``RunNotRunning``:
+    ``not_running``, ``steps_refused`` (a ``/start`` whose step subset the catalog no longer wants,
+    EvilFlowersCatalog#183; the analyzer drops the pass), an unknown reason, or none (a catalog that predates the
+    reasons).
     """
     try:
         body = response.json()

@@ -10,7 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "celery[redis]>=5.6,<6",
     "pydantic>=2.12,<3",
-    "pydantic-settings>=2.6,<3",
+    # 2.7: `NoDecode` (judges.settings, evilflowers-worker#8).
+    "pydantic-settings>=2.7,<3",
     "redis>=5",
     "requests>=2.32",
     # The code uses the API only; a no-op without the `otel` extra. One release train with the catalog.

@@ -155,10 +155,13 @@ Rules:
 2. **`None` is not sent.** Empty lists are sent: `regions: []` means "no regions, report anyway".
 3. **Every extraction job message carries `run_id`, `source`, `output_dir`, and `attempt` once the run has one.** A
    standalone job carries `run_id`, `job`, `token`, `inputs`, `output_dir` and `outcome` instead (`StandaloneJob`, §2).
-4. **A batch job carries `job`:** `<kind>:<first>-<last>`, zero-padded, at most 30 characters (the catalog's limit).
-5. **Commands are sent from inside the consuming task**, so Celery stamps `parent_id`/`root_id` (the catalog's job
+4. **A step re-run** (EvilFlowersCatalog#183): `ExtractRequest.steps` is the sorted subset of `contract.Step`
+   (`equations`, `figures`, `paragraphs`, `tables`) to redo; absent or empty is a full pass. The analyzer echoes it in
+   `StartRun.steps`, which a full pass leaves out. A 409 `steps_refused` is a `RunNotRunning`: drop the pass.
+5. **A batch job carries `job`:** `<kind>:<first>-<last>`, zero-padded, at most 30 characters (the catalog's limit).
+6. **Commands are sent from inside the consuming task**, so Celery stamps `parent_id`/`root_id` (the catalog's job
    ledger attributes child tasks by `parent_id`) and the OTel instrumentation injects `traceparent`.
-6. **Validation happens at the edge.** A consumer validates its message first. An invalid message is reported as a
+7. **Validation happens at the edge.** A consumer validates its message first. An invalid message is reported as a
    failed job (when `run_id` can be read) and acknowledged; it is never retried.
 
 ### 3.2 Facts (catalog ingestion API)

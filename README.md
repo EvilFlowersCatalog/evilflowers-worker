@@ -33,7 +33,7 @@ The image installs `otel` and `profiling`. Without them, telemetry and profiling
 
 | Module | What it gives a service |
 |---|---|
-| `contract` | `ExtractRequest`, `ParagraphsJob`, `RegionsJob`, `StandaloneJob` (`input_paths()`, `prepare_output()`, `output_file()`) (commands); `Region` (with the optional decision fields `band`, `p`, `score`, `decision`, `decider_model`, …), `Paragraph`, `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
+| `contract` | `ExtractRequest` (`steps`: a step re-run), `ParagraphsJob`, `RegionsJob`, `StandaloneJob` (`input_paths()`, `prepare_output()`, `output_file()`) (commands); `Region` (with the optional decision fields `band`, `p`, `score`, `decision`, `decider_model`, …), `Paragraph`, `JobReport`, `RunState`, `StartRun` (catalog payloads); job-name rules |
 | `catalog` | `CatalogClient`: `run()`, `start()`, `regions()`, `paragraphs()`, `job()`; `?attempt=`; `RunNotRunning` / `RunSuperseded` / `DuplicateResults` / `CatalogRefused` (a refusal with the catalog's body) |
 | `jobs` | `LeafJob`: delivery cap, check, `extract`, `publish`, terminal report, `recheck()` for long jobs |
 | `outcome` | `OutcomeFile`, `atomic_write`, `write_outcome`: a catalog job's outcome file, last and atomic |

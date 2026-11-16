@@ -79,6 +79,9 @@ class LayoutRegion(BaseModel):
     caption: str | None = None
 
 
+#: A step the catalog can re-run on its own (EvilFlowersCatalog#183): one job kind of the extraction pipeline.
+Step = Literal["equations", "figures", "paragraphs", "tables"]
+
 #: ``[level, title, page]``: PyMuPDF's ``get_toc(simple=True)`` entry, 1-based page.
 OutlineEntry = tuple[int, str, int]
 
@@ -116,6 +119,9 @@ class ExtractRequest(Message):
     output_dir: str
     acquisition_id: str | None = None
     pipeline_version: int | None = None
+    #: A step re-run (EvilFlowersCatalog#183, analyzer#7): the sorted subset of steps to redo. Absent or empty: a full
+    #: pass.
+    steps: list[Step] = Field(default_factory=list)
 
 
 class JobMessage(Message):
@@ -279,6 +285,10 @@ class StartRun(BaseModel):
     page_sizes: list[list[float]]
     jobs: list[JobName]
     provenance: dict[str, Any] = Field(default_factory=dict)
+    #: The steps of a step re-run, echoed from ``ExtractRequest.steps``. ``None`` on a full pass, so ``dump`` sends no
+    #: ``steps`` field (``[]`` would put ``"steps": []`` on every full ``/start``). The catalog refuses a subset it did
+    #: not ask for with a 409 ``steps_refused`` (→ ``RunNotRunning``).
+    steps: list[Step] | None = None
 
 
 class JobReport(BaseModel):

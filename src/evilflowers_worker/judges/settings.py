@@ -9,10 +9,11 @@ The variable names are the ones the cluster already sets for the image and text-
 the service address or the full endpoint.
 """
 
-from typing import Any
+import json
+from typing import Annotated, Any
 
-from pydantic import AliasChoices, Field, SecretStr, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from evilflowers_worker.judges.schema import Thresholds
 
@@ -28,6 +29,14 @@ class JudgeSettings(BaseSettings):
         if isinstance(data, dict):
             return {key: value for key, value in data.items() if not (value == "" and key.lower() in _JUDGE_KEYS)}
         return data
+
+    @field_validator("judge_thresholds", mode="before")
+    @classmethod
+    def _thresholds_json(cls, value: Any) -> Any:
+        """``JUDGE_THRESHOLDS`` arrives as the raw env string (``NoDecode``): JSON, or blank for none."""
+        if isinstance(value, str):
+            return json.loads(value) if value.strip() else {}
+        return value
 
     #: Off: every question passes through unjudged (outcome ``disabled``).
     judges_enabled: bool = Field(False, validation_alias=AliasChoices("JUDGES_ENABLED", "DECIDER_ENABLED"))
@@ -63,8 +72,9 @@ class JudgeSettings(BaseSettings):
 
     # -- Bands, budget, breaker ------------------------------------------------------------------------------------
     #: Per question id, from knowledge#65: ``JUDGE_THRESHOLDS='{"figure_kind": {"keep": 0.8, "hide": 0.9}}'``.
-    #: A question without thresholds gets no band.
-    judge_thresholds: dict[str, Thresholds] = Field(default_factory=dict)
+    #: A question without thresholds gets no band. ``NoDecode``: the env source would JSON-decode the raw string
+    #: before any validator runs, and an empty value would stop the worker (evilflowers-worker#8).
+    judge_thresholds: Annotated[dict[str, Thresholds], NoDecode] = Field(default_factory=dict)
     #: Calls one job may make (0: no limit).
     judge_budget_calls: int = Field(500, ge=0)
     #: Seconds one job may spend waiting on judges (0: no limit).

@@ -21,6 +21,31 @@ COMMON = {"run_id": "run-1", "source": "a.pdf", "output_dir": "out"}
 BOX = {"x0": 0.1, "y0": 0.2, "x1": 0.3, "y1": 0.4}
 
 
+def test_an_extract_request_without_steps_is_a_full_pass():
+    request = ExtractRequest.model_validate({"run_id": "r", "source": "a.pdf", "output_dir": "out"})
+    assert request.steps == []
+
+
+def test_an_extract_request_carries_a_step_subset():
+    request = ExtractRequest.model_validate(
+        {"run_id": "r", "source": "a.pdf", "output_dir": "out", "steps": ["figures", "tables"]}
+    )
+    assert request.steps == ["figures", "tables"]
+    assert request.kwargs()["steps"] == ["figures", "tables"]
+
+
+def test_an_unknown_step_is_refused():
+    with pytest.raises(ValidationError):
+        ExtractRequest.model_validate({"run_id": "r", "source": "a.pdf", "output_dir": "out", "steps": ["outline"]})
+
+
+def test_a_full_start_sends_no_steps_and_a_step_rerun_sends_its_subset():
+    full = StartRun(page_count=1, page_sizes=[[595.0, 842.0]], jobs=["figures", "paragraphs"])
+    assert "steps" not in dump(full)
+    rerun = StartRun(page_count=1, page_sizes=[[595.0, 842.0]], jobs=["figures"], steps=["figures"])
+    assert dump(rerun)["steps"] == ["figures"]
+
+
 def test_a_region_without_a_decision_sends_no_decision_field():
     region = Region(kind="figure", page=1, seq=0, bbox=BOX)
     assert set(dump(region)) == {"kind", "page", "seq", "bbox", "provenance"}

@@ -130,6 +130,8 @@ def test_the_last_attempt_raises(settings):
     [
         (b"finished", RunNotRunning),
         ({"title": "not running", "reason": "not_running"}, RunNotRunning),
+        # A step re-run's /start refused (EvilFlowersCatalog#183): the analyzer relies on RunNotRunning here.
+        ({"title": "steps refused", "reason": "steps_refused"}, RunNotRunning),
         ({"title": "started again", "reason": "superseded", "attempt": 4}, RunSuperseded),
         ({"title": "started again", "additional_data": {"reason": "superseded"}}, RunSuperseded),
     ],
