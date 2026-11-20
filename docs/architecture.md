@@ -202,6 +202,26 @@ At-least-once, made safe by idempotency on the catalog's side:
 | Run restarted meanwhile | leftover work refused, job stops early | `attempt` + `GET runs/{id}` (`superseded`) |
 | Copy of a job already reported | does nothing | `RunState.skip_reason` (`already_done`) |
 | Message stuck unacked | restored after `BROKER_VISIBILITY_TIMEOUT` | **one value for every consumer of a Redis db: 12 h** |
+| Main process hangs (deadlock, blocked event loop, `kill -STOP`) | heartbeat file goes stale, kubelet restarts the container, the job is redelivered | `heartbeat` (a consumer bootstep on Celery's timer) + exec probe `evilflowers-worker-alive --max-age 90` |
+
+**Liveness probe (evilflowers-worker#11).** The workers have no port, so k8s probes a file. The worker touches
+`WORKER_HEARTBEAT_FILE` (default `/tmp/evilflowers-worker.heartbeat`, on the emptyDir) every
+`WORKER_HEARTBEAT_INTERVAL` seconds (default 30). The touch runs from the consumer's event loop in the main process,
+not from a thread of its own, so a hung main process stops it. A long task does not, because prefork runs it in a
+child. The `solo` pool runs tasks on the event loop, so it would trip the probe during a long job. A broker outage
+longer than the threshold also stops the touches and restarts the pod. **Threshold: 3 × the interval (90 s).**
+
+![Heartbeat file and exec liveness probe](diagrams/sequence-heartbeat-liveness.svg)
+![Liveness of a kit worker pod](diagrams/deployment-heartbeat-liveness.svg)
+
+```yaml
+livenessProbe:
+  exec:
+    command: ["evilflowers-worker-alive", "--max-age", "90"]
+  initialDelaySeconds: 120   # analyzer/equation load models at start
+  periodSeconds: 30
+  failureThreshold: 3
+```
 
 The last row is a rule, not a default: kombu restores *every* unacked message older than the restoring consumer's own
 timeout, in any queue (EvilFlowersCatalog#120, text#9, lcpencrypt#6).

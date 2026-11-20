@@ -1,0 +1,28 @@
+@startuml deployment-heartbeat-liveness
+!include elvira.iuml
+' What: a kit worker pod has no port, so the kubelet's exec probe reads the age of a heartbeat file the worker keeps on the /tmp emptyDir; the probe manifest is the knowledge#70 change in roles/evilflowers_k8s.
+' Kind: UML deployment diagram, specification level (one pod of any kit worker: analyzer, image, equation, text-tables, text-paragraphs, ocr, lcpencrypt).
+' Source: issues evilflowers-worker#11, EvilFlowersCatalog/knowledge#70; src/evilflowers_worker/heartbeat.py, alive.py, settings.py, pyproject.toml (2026-11-20)
+
+title Liveness of a kit worker pod (evilflowers-worker#11, 2026-11-20)
+
+node "k3s node" as k3s <<executionEnvironment>> {
+  node "kubelet" as kubelet <<executionEnvironment>> {
+    artifact "livenessProbe (roles/evilflowers_k8s, knowledge#70)\nexec evilflowers-worker-alive --max-age 90\ninitialDelaySeconds 120, periodSeconds 30, failureThreshold 3" as probe <<proposed>>
+  }
+  node "worker pod: <service> image\n(read-only root filesystem)" as pod <<container>> {
+    artifact "celery -A <service> worker\n(main process: create_app() adds the Heartbeat consumer step)" as worker <<focus>>
+    artifact "evilflowers-worker-alive\n([project.scripts], stdlib only)" as alive
+    artifact "/tmp/evilflowers-worker.heartbeat\n(WORKER_HEARTBEAT_FILE)" as file
+    node "/tmp: emptyDir" as tmp <<volume>>
+  }
+}
+
+kubelet --> pod : exec probe every 30 s; restart the container after 3 failures
+worker ..> file : <<touch>> every WORKER_HEARTBEAT_INTERVAL (30 s), from the event loop
+alive ..> file : <<stat>> mtime: exit 0 if at most 90 s old, else 1
+file ..> tmp : <<mount>> rw
+
+$legend_live_proposed()
+footer ELVIRA · FIIT STU · evilflowers-worker · docs/diagrams/deployment-heartbeat-liveness.puml
+@enduml

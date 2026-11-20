@@ -16,6 +16,8 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from evilflowers_worker import alive
+
 #: Twelve hours. Every consumer of a Redis db restores *all* unacknowledged messages older than its own timeout, in
 #: any queue, so this must outlast the longest task of any service on the db (EvilFlowersCatalog#120, text#9).
 VISIBILITY_TIMEOUT = 12 * 3600
@@ -42,6 +44,12 @@ class RuntimeSettings(BaseSettings):
     #: Deliveries of one message before the job is given up instead of run again (it killed its worker every time).
     #: 0 turns the cap off.
     max_deliveries: int = Field(5, ge=0)
+
+    # -- Liveness (``heartbeat``) ------------------------------------------------------------------------------------
+    #: The file the worker touches while healthy; the exec probe ``evilflowers-worker-alive`` checks its age.
+    worker_heartbeat_file: Path = alive.DEFAULT_FILE
+    #: Seconds between touches. The probe's threshold (``--max-age``) should be 3 x this value.
+    worker_heartbeat_interval: float = Field(alive.DEFAULT_INTERVAL, gt=0)
 
     # -- Storage and provenance -----------------------------------------------------------------------------------
     #: The catalog's storage root: originals are read here, outputs written.

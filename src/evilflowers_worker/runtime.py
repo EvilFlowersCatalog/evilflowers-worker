@@ -8,6 +8,7 @@
 - its queues declared as direct exchanges of the same name (what Celery declares for a queue a producer names, so
   ``send_task(..., queue=...)`` from anywhere reaches it);
 - the scale-in protocol of ``shutdown``;
+- the liveness heartbeat file of ``heartbeat`` (the k8s exec probe ``evilflowers-worker-alive``);
 - telemetry and JSON logs (``observability``).
 
 Nobody waits for a task's result (every job reports to the catalog, or leaves an outcome file), so there is no result
@@ -36,6 +37,7 @@ from pydantic import BaseModel, ValidationError
 from evilflowers_worker import observability
 from evilflowers_worker.contract import JobMessage, Message, Route
 from evilflowers_worker.deliveries import DeliveryCounter, capped
+from evilflowers_worker.heartbeat import heartbeat_step
 from evilflowers_worker.jobs import LeafJob, report_invalid_message
 from evilflowers_worker.observability.signals import connect as connect_telemetry
 from evilflowers_worker.settings import RuntimeSettings, WorkerSettings
@@ -127,6 +129,7 @@ def create_app(
         redis_url=settings.redis_url,
         on_requeue=deliveries.forget,
     ).install()
+    app.steps["consumer"].add(heartbeat_step(settings.worker_heartbeat_file, settings.worker_heartbeat_interval))
     return app
 
 

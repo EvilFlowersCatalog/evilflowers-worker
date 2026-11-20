@@ -5,6 +5,7 @@
 - ``jobs``: the lifecycle of a leaf job (check → extract → publish → report);
 - ``runtime``: the Celery app factory, task options and the command publisher;
 - ``deliveries`` / ``shutdown``: the delivery cap and the scale-in protocol;
+- ``heartbeat`` / ``alive``: the heartbeat file and the ``evilflowers-worker-alive`` exec liveness probe;
 - ``observability``: traces, metrics, profiles and JSON logs;
 - ``settings``: what every worker is configured with.
 """

@@ -18,6 +18,10 @@ dependencies = [
     "opentelemetry-api==1.45.2",
 ]
 
+[project.scripts]
+# The exec liveness probe (evilflowers-worker#11): exit 1 once the heartbeat file is stale.
+evilflowers-worker-alive = "evilflowers_worker.alive:main"
+
 [project.optional-dependencies]
 # OTLP/HTTP to the node's Alloy; SDK/exporter 1.x and contrib 0.yb0 move together (as in the catalog).
 otel = [

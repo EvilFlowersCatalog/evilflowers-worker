@@ -2,6 +2,7 @@
 
 - Scale-in (analyzer#2): what a SIGTERMed worker does with the job in hand.
 - The delivery cap (analyzer#3): a job that kills its worker every time is given up.
+- The liveness heartbeat (evilflowers-worker#11): a frozen main process stops touching, a long job does not.
 - Wire facts other services rely on: a command sent from inside a task carries its ``parent_id`` (the catalog's job
   ledger), and a leaf job reads its run, sends ``?attempt=`` and reports, or reports an invalid message failed.
 
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from evilflowers_worker.alive import main as alive_main
 from evilflowers_worker.deliveries import DeliveryCounter
 from evilflowers_worker.runtime import create_app, standalone_callbacks
 from evilflowers_worker.settings import WorkerSettings
@@ -155,6 +157,44 @@ def test_a_job_that_kills_its_worker_every_time_is_given_up_after_the_cap(probe,
     )
     # The third delivery is past the cap: it returns instead of dying, and the message is acknowledged.
     assert wait_for(lambda: worker.redis.llen(worker.queue) == 0 and worker.unacked() == before, 30)
+
+
+# -- Liveness heartbeat (evilflowers-worker#11) ----------------------------------------------------------------------
+
+
+def alive(heartbeat: Path, max_age: float) -> bool:
+    return alive_main(["--file", str(heartbeat), "--max-age", str(max_age)]) == 0
+
+
+def test_a_frozen_worker_lets_its_heartbeat_go_stale(probe, tmp_path):
+    heartbeat = tmp_path / "heartbeat"
+    worker = probe(WORKER_HEARTBEAT_FILE=str(heartbeat), WORKER_HEARTBEAT_INTERVAL="1")
+    assert wait_for(heartbeat.exists, 60), "the worker never touched its heartbeat file"
+    assert wait_for(lambda: alive(heartbeat, 3), 10)
+    assert worker.process is not None
+
+    worker.signal(signal.SIGSTOP)  # the main process only: as `kill -STOP <pid 1>` in a pod
+    try:
+        assert wait_for(lambda: not alive(heartbeat, 3), 10), "a frozen worker kept its heartbeat fresh"
+        touched = heartbeat.stat().st_mtime
+        time.sleep(2)
+        assert heartbeat.stat().st_mtime == touched
+    finally:
+        worker.signal(signal.SIGCONT)
+    assert wait_for(lambda: alive(heartbeat, 3), 10), "the heartbeat did not resume"
+
+
+def test_a_long_job_does_not_starve_the_heartbeat(probe, tmp_path):
+    heartbeat = tmp_path / "heartbeat"
+    worker = probe(WORKER_HEARTBEAT_FILE=str(heartbeat), WORKER_HEARTBEAT_INTERVAL="1", PROBE_SECONDS="600")
+    start_book(worker, tmp_path)
+
+    # The book runs in the prefork child; the parent's event loop keeps touching.
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline:
+        assert alive(heartbeat, 3)
+        time.sleep(0.5)
+    assert not (tmp_path / "finished").exists()
 
 
 # -- Wire facts -------------------------------------------------------------------------------------------------------

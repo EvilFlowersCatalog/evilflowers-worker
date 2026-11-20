@@ -1,0 +1,40 @@
+@startuml sequence-heartbeat-liveness
+!include elvira.iuml
+' What: the main process touches the heartbeat file from its event loop, so a frozen main process lets it go stale and the kubelet restarts the container, while a long task in a prefork child does not.
+' Kind: UML sequence diagram, one worker container. Scope: the kit's side and the kubelet's exec probe; the job's redelivery after the restart is one note.
+' Source: issue evilflowers-worker#11; src/evilflowers_worker/heartbeat.py, alive.py, runtime.py; tests/test_runtime.py (2026-11-20)
+
+title Heartbeat file and exec liveness probe (evilflowers-worker#11, 2026-11-20)
+
+participant "kubelet" as kubelet
+participant "evilflowers-\nworker-alive\n(exec)" as alive
+participant "Celery main process\nconsumer event loop" as main <<focus>>
+participant "prefork child" as child
+database "heartbeat file\n/tmp (emptyDir)" as file
+
+== start: create_app() adds the Heartbeat consumer step (requires Tasks) ==
+main -> file : touch (Heartbeat.start)
+main -> main : c.timer.call_repeatedly(WORKER_HEARTBEAT_INTERVAL = 30 s, touch)
+
+== healthy, even during a 2 h task ==
+main -> child : task (prefork: off the event loop)
+loop every 30 s
+  main -> file : touch (mtime = now)
+end
+loop periodSeconds 30, after initialDelaySeconds 120
+  kubelet -> alive : exec --max-age 90
+  alive -> file : stat().st_mtime
+  alive --> kubelet : exit 0 (age <= 90 s)
+end
+
+== main process frozen: deadlock, blocked event loop, kill -STOP ==
+main -[$accent_msg()]> main : <b>timer never fires</b>
+kubelet -> alive : exec --max-age 90
+alive -> file : stat().st_mtime
+alive -[$accent_msg()]> kubelet : <b>exit 1</b>, "dead: last touched N s ago"
+kubelet -> main : after failureThreshold 3: restart the container
+note right of main : the job in hand was never acked:\nacks_late, redelivered to another worker
+
+caption Threshold = 3 x interval (90 s). The solo pool runs tasks on the event loop and would trip the probe; a broker outage\nlonger than the threshold also stops the touches (the consumer blocks while it reconnects). An unwritable path is logged once.
+footer ELVIRA · FIIT STU · evilflowers-worker · docs/diagrams/sequence-heartbeat-liveness.puml
+@enduml

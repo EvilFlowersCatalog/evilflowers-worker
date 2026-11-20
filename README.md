@@ -40,8 +40,9 @@ The image installs `otel` and `profiling`. Without them, telemetry and profiling
 | `runtime` | `create_app()`, `JOB_TASK_OPTIONS`, `run_job()` (leaf jobs), `run_task()` (anything else), `standalone_callbacks()` (an orchestrator's `link` / `link_error`), `Publisher` / `CeleryPublisher`, `runtime().delivery(task)` |
 | `deliveries` | `DeliveryCounter` and `capped()`: the Redis count behind the delivery cap |
 | `shutdown` | SIGTERM: warm shutdown, grace timer, cold cancel, fallback requeue |
+| `heartbeat` / `alive` | The k8s liveness probe: the worker touches `WORKER_HEARTBEAT_FILE` (default `/tmp/evilflowers-worker.heartbeat`) every `WORKER_HEARTBEAT_INTERVAL` s (default 30) from its event loop; `evilflowers-worker-alive --max-age 90` exits 1 once it is stale. Recommended threshold: 3 × the interval |
 | `observability` | `configure`, `bind`, `span`, `annotate`, `fail`, `untraced_http`, `metrics.Instrument`, JSON logs, Pyroscope; `CATALOG_JOB_ATTRIBUTES` |
-| `settings` | `RuntimeSettings`: broker, storage (`storage_file`), shutdown, delivery cap, logs; `WorkerSettings`: plus the catalog ingestion API |
+| `settings` | `RuntimeSettings`: broker, storage (`storage_file`), shutdown, delivery cap, heartbeat, logs; `WorkerSettings`: plus the catalog ingestion API |
 | `judges` | `Judges.from_settings()`, `Panel.ask()`, `Panel.ask_batch()` (one question about many states, `decider` only, 64 per request): narrow checks by `decider`, `decider-vision`, Ollama and tei-rerank (`Choice` / `Binary` → `Verdict` with a band); budget per job, circuit breaker per client, never fails the job; `JudgeSettings` mixin (docs/architecture.md §5.1) |
 | `testing` | `FakeCatalog`, `RefusingCatalog`, `RecordingPublisher`, `running()`; `StubCatalogServer`, `assert_outcome`, `WorkerProcess` (a real worker against Redis) |
 
