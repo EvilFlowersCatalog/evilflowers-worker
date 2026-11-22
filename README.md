@@ -173,6 +173,9 @@ The kit is released as immutable SemVer tags `vX.Y.Z` on `master` (evilflowers-w
 - **Never move or delete a tag.** A wrong release is fixed by the next patch tag.
 - **The version follows the tag.** `version` in `pyproject.toml` equals the tag without the `v`. Bump it in the commit
   you tag.
+- **Every change goes into [`CHANGELOG.md`](CHANGELOG.md).** Add an entry under *Unreleased* in the same commit as
+  the change, with its issue number. To release, rename *Unreleased* to the new version and date it, add an empty
+  *Unreleased* above it, and update the compare links at the bottom.
 - **Breaking changes bump the minor version while the kit is `0.x`.** A break is a change to a public API:
   `runtime.create_app`, `runtime.run_job` / `run_task`, `jobs`, `contract`, `judges`, or a setting name. Any other
   change is a patch.
@@ -180,7 +183,7 @@ The kit is released as immutable SemVer tags `vX.Y.Z` on `master` (evilflowers-w
 To cut a release:
 
 ```shell
-# master is green on the commit; pyproject.toml says version = "0.1.0"
+# master is green on the commit; pyproject.toml says version = "0.1.0"; CHANGELOG.md has a dated [0.1.0]
 git tag -a v0.1.0 -m "evilflowers-worker 0.1.0"
 git push origin v0.1.0
 ```
