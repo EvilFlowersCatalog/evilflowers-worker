@@ -18,8 +18,10 @@ It has no model, layout or PDF dependency and runs on Python 3.12 to 3.14, so ev
 dependencies = ["evilflowers-worker"]
 
 [tool.uv.sources]
-evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", rev = "<sha>" }
+evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", branch = "master" }
 ```
+
+A service keeps `branch = "master"` and its CI decides which kit ref a build locks to (see [Releases](#releases)).
 
 Extras:
 - `otel`: the OpenTelemetry SDK and instrumentations;
@@ -161,6 +163,42 @@ def job_failed(self, task_id: str, job_id: str): ...
 
 Never set `priority` on a message for a kit queue: a kit worker does not poll kombu's priority lists, so the message
 would be stranded (docs/architecture.md §3.3).
+
+## Releases
+
+The kit is released as immutable SemVer tags `vX.Y.Z` on `master` (evilflowers-worker#13).
+
+- **Tag only a green commit.** Tag a `master` commit only after `Test` has passed on it. `test.yml` runs again on the
+  tag.
+- **Never move or delete a tag.** A wrong release is fixed by the next patch tag.
+- **The version follows the tag.** `version` in `pyproject.toml` equals the tag without the `v`. Bump it in the commit
+  you tag.
+- **Breaking changes bump the minor version while the kit is `0.x`.** A break is a change to a public API:
+  `runtime.create_app`, `runtime.run_job` / `run_task`, `jobs`, `contract`, `judges`, or a setting name. Any other
+  change is a patch.
+
+To cut a release:
+
+```shell
+# master is green on the commit; pyproject.toml says version = "0.1.0"
+git tag -a v0.1.0 -m "evilflowers-worker 0.1.0"
+git push origin v0.1.0
+```
+
+Which kit ref a service build locks to. The rule is the same in every consumer, and CI locks the ref for that run
+only and never commits the lock:
+
+| Service ref | Kit ref |
+|---|---|
+| `develop`, pull requests, other branches | `master` head |
+| `main` / `master`, tags | newest `v*.*.*` tag (`master` with a warning while there is none) |
+| repository variable `KIT_REF=<ref>` | that ref (a hold on a known-good tag, or a kit branch under test); the nightly does nothing while it is set |
+
+So prod only gets a released kit. A service whose `develop` uses kit API that exists only on `master` fails CI on the
+`develop` → `main` merge. Cut a kit tag first, then merge the service. A service's nightly compares `git ls-remote`
+`master` with the `sk.stuba.elvira.evilflowers-worker.revision` label of its `:develop` image and rebuilds `develop`
+when they differ. The shared `resolve-worker` action and the reusable `worker-nightly.yml` live in
+evilflowers-actions (evilflowers-actions#1).
 
 ## Tests
 

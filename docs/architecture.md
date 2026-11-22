@@ -329,14 +329,17 @@ src/evilflowers_worker/
                        decider-vision, Ollama and tei-rerank; per-job Panel with budget and circuit breakers
 ```
 
-It has no docling, torch or model dependency. A service pins it to a commit:
+It has no docling, torch or model dependency. A service follows `master`:
 
 ```toml
 [tool.uv.sources]
-evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", rev = "<sha>" }
+evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", branch = "master" }
 ```
 
-A fix here reaches a service when it bumps `rev` (and runs `uv lock`); nothing changes under a service that does not.
+The service's CI locks the kit ref for each build and never commits the lock. `develop` builds lock to the `master`
+head, and `main` builds lock to the newest release tag `vX.Y.Z`. A repository variable `KIT_REF` holds every build on
+one ref. A nightly rebuilds `develop` when `master` moved. A fix here reaches dev on the next night, and prod only
+when it is tagged and the service is released (README, *Releases*; evilflowers-worker#13).
 
 ### 5.1 Judges (the `judges` extra)
 
